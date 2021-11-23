@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 
 # Parts of the code here are adapted from PyTorch
@@ -37,6 +38,8 @@ from .utils import divide
 from .utils import split_tensor_along_last_dim
 from .utils import VocabUtility
 from megatron import get_args
+import torch_xla.core.xla_model as xm
+torch.cuda.current_device = lambda: xm.xla_device() 
 
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {'tensor_model_parallel': False,
@@ -179,21 +182,35 @@ class VocabParallelEmbedding(torch.nn.Module):
     def forward(self, input_):
         if self.tensor_model_parallel_size > 1:
             # Build the mask.
-            input_mask = (input_ < self.vocab_start_index) | \
-                         (input_ >= self.vocab_end_index)
+            #original
+            #input_mask = (input_ < self.vocab_start_index) | \
+            #             (input_ >= self.vocab_end_index)
+            #new xla friendly
+            input_mask = (input_ >= self.vocab_start_index) & \
+                         (input_ < self.vocab_end_index)
+
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            #original
+            #masked_input[input_mask] = 0
+            #new xla friendly
+            masked_input = torch.mul(masked_input, input_mask.long())
+            #masked_input = torch.mul(masked_input, input_mask.int())
         else:
             masked_input = input_
             # Get the embeddings.
-        output_parallel = F.embedding(masked_input, self.weight,
+        #output_parallel = F.embedding(masked_input, self.weight, #original
+        output_parallel = F.embedding(masked_input.long(), self.weight,
                                       self.padding_idx, self.max_norm,
                                       self.norm_type, self.scale_grad_by_freq,
                                       self.sparse)
         # Mask the output embedding.
         if self.tensor_model_parallel_size > 1:
-            output_parallel[input_mask, :] = 0.0
+            #original
+            #output_parallel[input_mask, :] = 0.0
+            #new xla friendly
+            output_parallel = torch.mul(output_parallel, torch.unsqueeze(input_mask.float(), dim=-1))
+
         # Reduce across all the model parallel GPUs.
         output = reduce_from_tensor_model_parallel_region(output_parallel)
         return output
@@ -219,14 +236,16 @@ class ColumnParallelLinearWithAsyncAllreduce(torch.autograd.Function):
         use_bias = ctx.use_bias
         grad_input = grad_output.matmul(weight)
         # Asyncronous all-reduce
-        handle = torch.distributed.all_reduce(
+        #handle = torch.distributed.all_reduce(
+        #        grad_input, group=get_tensor_model_parallel_group(), async_op=True)
+        torch.distributed.all_reduce(
                 grad_input, group=get_tensor_model_parallel_group(), async_op=True)
         # Delay the start of weight gradient computation shortly (3us) to have
         # all-reduce scheduled first and have GPU resources allocated
         _ = torch.empty(1, device=grad_output.device) + 1
         grad_weight = grad_output.t().matmul(input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
-        handle.wait()
+        #handle.wait()
         return grad_input, grad_weight, grad_bias
 
 

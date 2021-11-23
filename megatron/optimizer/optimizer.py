@@ -20,14 +20,17 @@ from abc import abstractmethod
 
 import torch
 
-from apex.multi_tensor_apply import multi_tensor_applier
-import amp_C
+#from apex.multi_tensor_apply import multi_tensor_applier
+#import amp_C
 
 from megatron import get_timers
 from megatron import mpu
 from megatron import print_rank_0
 
 from .clip_grads import clip_grad_norm_fp32, count_zeros_fp32
+import torch_xla.core.xla_model as xm
+torch.cuda.FloatTensor = lambda t: torch.FloatTensor(t).to(xm.xla_device())
+torch.cuda.IntTensor = lambda t: torch.IntTensor(t).to(xm.xla_device())
 
 
 def _zero_grad_group_helper(group, set_to_none):
@@ -50,17 +53,19 @@ def _multi_tensor_copy_this_to_that(this, that, overflow_buf=None):
     We don't have a blfoat16 implementation so for now if the overflow_buf
     is not provided, we default back to simple loop copy to be compatible
     with bfloat16."""
-    if overflow_buf:
-        overflow_buf.fill_(0)
-        # Scaling with factor `1.0` is equivalent to copy.
-        multi_tensor_applier(amp_C.multi_tensor_scale,
-                             overflow_buf,
-                             [this, that],
-                             1.0)
-    else:
-        for this_, that_ in zip(this, that):
-            that_.copy_(this_)
+    #if overflow_buf:
+    #    overflow_buf.fill_(0)
+    #    # Scaling with factor `1.0` is equivalent to copy.
+    #    multi_tensor_applier(amp_C.multi_tensor_scale,
+    #                         overflow_buf,
+    #                         [this, that],
+    #                         1.0)
+    #else:
+    #    for this_, that_ in zip(this, that):
+    #        that_.copy_(this_)
 
+    for this_, that_ in zip(this, that):
+        that_.copy_(this_)
 
 
 class MegatronOptimizer(ABC):
@@ -247,8 +252,10 @@ class Float16OptimizerWithFloat16Params(MegatronOptimizer):
                 if param.requires_grad:
 
                     # float16 params:
-                    if param.type() in ['torch.cuda.HalfTensor',
-                                        'torch.cuda.BFloat16Tensor']:
+                    #if param.type() in ['torch.cuda.HalfTensor',
+                    #                    'torch.cuda.BFloat16Tensor']:
+                    if param.type() in ['torch.HalfTensor',
+                                        'torch.BFloat16Tensor']:
                         float16_params_this_group.append(param)
                         # Create a copy
                         main_param = param.detach().clone().float()
@@ -266,7 +273,8 @@ class Float16OptimizerWithFloat16Params(MegatronOptimizer):
                                 = self.optimizer.state.pop(param)
 
                     # fp32 params.
-                    elif param.type() == 'torch.cuda.FloatTensor':
+                    #elif param.type() == 'torch.cuda.FloatTensor':
+                    elif param.type() == 'torch.FloatTensor':
                         fp32_params_this_group.append(param)
                         param_group['params'][i] = param
 

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """General utilities."""
 
@@ -20,8 +21,8 @@ import sys
 import torch
 from torch.nn.parallel import DistributedDataParallel as torchDDP
 
-from apex.multi_tensor_apply import multi_tensor_applier
-import amp_C
+#from apex.multi_tensor_apply import multi_tensor_applier
+#import amp_C
 
 from megatron import get_args
 from megatron import print_rank_0
@@ -29,6 +30,7 @@ from megatron import get_adlr_autoresume
 from megatron import mpu
 from megatron.model.module import param_is_not_shared
 from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
+import torch_xla.core.xla_model as xm
 
 
 def unwrap_model(model, module_instances=(torchDDP)):
@@ -63,18 +65,23 @@ def calc_params_l2_norm(model):
                 else:
                     params_data.append(param.data)
     # Calculate norm
-    dummy_overflow_buf = torch.cuda.IntTensor([0])
-    norm, _ = multi_tensor_applier(
-        amp_C.multi_tensor_l2norm,
-        dummy_overflow_buf,
-        [params_data],
-        False # no per-parameter norm
-    )
-    norm_2 = norm * norm
+    #dummy_overflow_buf = torch.cuda.IntTensor([0])
+    #norm, _ = multi_tensor_applier(
+    #    amp_C.multi_tensor_l2norm,
+    #    dummy_overflow_buf,
+    #    [params_data],
+    #    False # no per-parameter norm
+    #)
+    #norm_2 = norm * norm
+    norm_2 = torch.tensor([0.0]).to(xm.xla_device())
+    for p in params_data:
+        norm = torch.norm(p, 2.0)
+        norm_2 += norm ** 2.0
     # Sum across all model-parallel GPUs.
     torch.distributed.all_reduce(norm_2,
                                  op=torch.distributed.ReduceOp.SUM,
-                                 group=mpu.get_model_parallel_group())
+                                 group=mpu.get_model_parallel_group(),
+                                 async_op=True)
     return norm_2.item() ** 0.5
 
 
@@ -82,10 +89,14 @@ def average_losses_across_data_parallel_group(losses):
     """Reduce a tensor of losses across all GPUs."""
     averaged_losses = torch.cat(
         [loss.clone().detach().view(1) for loss in losses])
-    torch.distributed.all_reduce(averaged_losses,
-                                 group=mpu.get_data_parallel_group())
-    averaged_losses = averaged_losses / \
-        torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
+    #torch.distributed.all_reduce(averaged_losses,
+    #                             group=mpu.get_data_parallel_group())
+    #print('before:averaged_losses:{}'.format(averaged_losses))
+    #averaged_losses = xm.all_reduce('sum', averaged_losses, groups=mpu.get_data_parallel_group())
+    #print('averaged_losses:{}, data_parallel_size:{}'.format(averaged_losses, mpu.get_data_parallel_world_size()))
+    #averaged_losses = averaged_losses / \
+    #    mpu.get_data_parallel_world_size()
+        #torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
 
     return averaged_losses
 
@@ -168,8 +179,9 @@ def get_ltor_masks_and_position_ids(data,
     if eod_mask_loss:
         loss_mask[data == eod_token] = 0.0
 
-    # Position ids.
-    position_ids = torch.arange(seq_length, dtype=torch.long,
+    # Position ids. (new) changing to 32bit
+    #position_ids = torch.arange(seq_length, dtype=torch.long,
+    position_ids = torch.arange(seq_length, dtype=torch.int,
                                 device=data.device)
     position_ids = position_ids.unsqueeze(0).expand_as(data)
     # We need to clone as the ids will be modifed based on batch index.

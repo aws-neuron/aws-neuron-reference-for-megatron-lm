@@ -12,19 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Gradient clipping."""
 
 import torch
 from torch._six import inf
 
-from apex.multi_tensor_apply import multi_tensor_applier
-import amp_C
+#from apex.multi_tensor_apply import multi_tensor_applier
+#import amp_C
 
 from megatron import mpu
 from megatron.model.module import param_is_not_shared
 from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
 
+import torch_xla.core.xla_model as xm
+torch.cuda.FloatTensor = lambda t: torch.FloatTensor(t).to(xm.xla_device())
+torch.cuda.IntTensor = lambda t: torch.IntTensor(t).to(xm.xla_device())
 
 def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
     """Clips gradient norm of an iterable of parameters whose gradients
@@ -61,8 +65,8 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
         if grad_not_none:
             grad = param.grad.detach()
         if grad_not_none:
-            # Make sure the grads are in fp32
-            assert param.grad.type() == 'torch.cuda.FloatTensor'
+            # Make sure the grads are in fp32: (TODO:what is xla equiv?)
+            #assert param.grad.type() == 'torch.cuda.FloatTensor'
             grads.append(grad)
         if grad_not_none and is_not_shared and is_not_tp_duplicate:
             grads_for_norm.append(grad)
@@ -84,19 +88,22 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.cuda.IntTensor([0])
+            #dummy_overflow_buf = torch.cuda.IntTensor([0])
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
-            grad_norm, _ = multi_tensor_applier(
-                amp_C.multi_tensor_l2norm,
-                dummy_overflow_buf,
-                [grads_for_norm],
-                False # no per-parameter norm
-            )
+            #grad_norm, _ = multi_tensor_applier(
+            #    amp_C.multi_tensor_l2norm,
+            #    dummy_overflow_buf,
+            #    [grads_for_norm],
+            #    False # no per-parameter norm
+            #)
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
-            total_norm = grad_norm ** norm_type
+            #total_norm = grad_norm ** norm_type
+            for grad in grads_for_norm:
+                grad_norm = torch.norm(grad, norm_type)
+                total_norm += grad_norm ** norm_type
 
         else:
             for grad in grads_for_norm:
@@ -106,18 +113,21 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
         # Sum across all model-parallel GPUs.
         torch.distributed.all_reduce(total_norm,
                                      op=torch.distributed.ReduceOp.SUM,
-                                     group=mpu.get_model_parallel_group())
-        total_norm = total_norm.item() ** (1.0 / norm_type)
+                                     group=mpu.get_model_parallel_group(),
+                                     async_op=True)
+        #total_norm = total_norm.item() ** (1.0 / norm_type)
+        total_norm = torch.pow(total_norm, 1.0 / norm_type)
 
     # Scale.
     clip_coeff = max_norm / (total_norm + 1.0e-6)
-    if clip_coeff < 1.0:
-        dummy_overflow_buf = torch.cuda.IntTensor([0])
-        multi_tensor_applier(amp_C.multi_tensor_scale,
-                             dummy_overflow_buf,
-                             [grads, grads],
-                             clip_coeff)
-
+    #if clip_coeff < 1.0:
+    #    dummy_overflow_buf = torch.cuda.IntTensor([0])
+    #    multi_tensor_applier(amp_C.multi_tensor_scale,
+    #                         dummy_overflow_buf,
+    #                         [grads, grads],
+    #                         clip_coeff)
+    for g in grads:
+        g.data.mul_(torch.where(clip_coeff < 1, clip_coeff, torch.tensor(1., device=xm.xla_device())))
     return total_norm
 
 

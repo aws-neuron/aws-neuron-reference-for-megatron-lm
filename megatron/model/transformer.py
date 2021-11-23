@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Transformer."""
 import math
@@ -26,6 +27,8 @@ from megatron.model import LayerNorm
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
+import torch_xla.core.xla_model as xm
+torch.cuda.current_device = lambda: xm.xla_device()
 
 
 """ We use the following notation throughout this file:

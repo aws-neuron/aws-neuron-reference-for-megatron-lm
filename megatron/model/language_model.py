@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Transformer based language model."""
 
@@ -191,7 +192,8 @@ class Embedding(MegatronModule):
     def forward(self, input_ids, position_ids, tokentype_ids=None):
         # Embeddings.
         words_embeddings = self.word_embeddings(input_ids)
-        position_embeddings = self.position_embeddings(position_ids)
+        #position_embeddings = self.position_embeddings(position_ids)
+        position_embeddings = self.position_embeddings(position_ids.long()) #original:32bit
         embeddings = words_embeddings + position_embeddings
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None

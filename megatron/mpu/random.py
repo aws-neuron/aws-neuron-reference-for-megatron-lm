@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 
 # Parts of the code here are adapted from PyTorch
@@ -31,44 +32,48 @@ from .initialize import get_data_parallel_rank
 from .initialize import get_tensor_model_parallel_group
 from .initialize import get_tensor_model_parallel_rank
 from .initialize import get_tensor_model_parallel_world_size
+torch.cuda.manual_seed = lambda s: torch.manual_seed(s)
+torch.cuda.get_rng_state = lambda : torch.get_rng_state()
 
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
 
 
+#def _set_cuda_rng_state(new_state, device=-1):
+#    """Sets the random number generator state of the current GPU.
+#
+#    Argumentss:
+#        new_state (torch.ByteTensor): The desired state
+#    This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
+#    with a single change: the input state is not cloned. Cloning caused
+#    major performance issues for +4 GPU cases.
+#    """
+#    if hasattr(_C, '_cuda_setRNGState') and callable(_C._cuda_setRNGState):
+#        # older PyTorch
+#        def cb():
+#            with device_ctx_manager(device):
+#                _C._cuda_setRNGState(new_state)
+#    else:
+#        # newer PyTorch
+#        if device == -1:
+#            device = torch.device('cuda')
+#        elif isinstance(device, str):
+#            device = torch.device(device)
+#        elif isinstance(device, int):
+#            device = torch.device('cuda', device)
+#
+#        def cb():
+#            idx = device.index
+#            if idx is None:
+#                idx = torch.cuda.current_device()
+#            default_generator = torch.cuda.default_generators[idx]
+#            default_generator.set_state(new_state)
+#
+#    _lazy_call(cb)
+
 def _set_cuda_rng_state(new_state, device=-1):
-    """Sets the random number generator state of the current GPU.
-
-    Argumentss:
-        new_state (torch.ByteTensor): The desired state
-    This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
-    with a single change: the input state is not cloned. Cloning caused
-    major performance issues for +4 GPU cases.
-    """
-    if hasattr(_C, '_cuda_setRNGState') and callable(_C._cuda_setRNGState):
-        # older PyTorch
-        def cb():
-            with device_ctx_manager(device):
-                _C._cuda_setRNGState(new_state)
-    else:
-        # newer PyTorch
-        if device == -1:
-            device = torch.device('cuda')
-        elif isinstance(device, str):
-            device = torch.device(device)
-        elif isinstance(device, int):
-            device = torch.device('cuda', device)
-
-        def cb():
-            idx = device.index
-            if idx is None:
-                idx = torch.cuda.current_device()
-            default_generator = torch.cuda.default_generators[idx]
-            default_generator.set_state(new_state)
-
-    _lazy_call(cb)
-
+        torch.set_rng_state(new_state)
 
 def split_tensor_into_1d_equal_chunks(tensor, new_buffer=False):
     """Break a tensor into equal 1D chunks."""
@@ -203,13 +208,13 @@ def model_parallel_cuda_manual_seed(seed):
     # Data parallel gets the original seed.
     data_parallel_seed = seed
 
-    if torch.distributed.get_rank() == 0:
-        print('> initializing model parallel cuda seeds on global rank {}, '
-              'model parallel rank {}, and data parallel rank {} with '
-              'model parallel seed: {} and data parallel seed: {}'.format(
-                  torch.distributed.get_rank(), get_tensor_model_parallel_rank(),
-                  get_data_parallel_rank(), tensor_model_parallel_seed,
-                  data_parallel_seed), flush=True)
+    #if torch.distributed.get_rank() == 0: (TODO), uncomment later
+    #    print('> initializing model parallel cuda seeds on global rank {}, '
+    #          'model parallel rank {}, and data parallel rank {} with '
+    #          'model parallel seed: {} and data parallel seed: {}'.format(
+    #              torch.distributed.get_rank(), get_tensor_model_parallel_rank(),
+    #              get_data_parallel_rank(), tensor_model_parallel_seed,
+    #              data_parallel_seed), flush=True)
     _CUDA_RNG_STATE_TRACKER.reset()
     # Set the default state.
     torch.cuda.manual_seed(data_parallel_seed)

@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from apex.optimizers import FusedAdam as Adam
-from apex.optimizers import FusedSGD as SGD
+#from apex.optimizers import FusedAdam as Adam
+#from apex.optimizers import FusedSGD as SGD
+from torch.optim import AdamW as Adam
+from torch.optim import SGD
 
 from megatron import get_args
 from megatron.model import LayerNorm

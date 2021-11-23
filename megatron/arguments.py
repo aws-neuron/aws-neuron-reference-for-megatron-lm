@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Megatron arguments."""
 
@@ -616,7 +617,7 @@ def _add_distributed_args(parser):
     group.add_argument('--num-layers-per-virtual-pipeline-stage', type=int, default=None,
                        help='Number of layers per virtual pipeline stage')
     group.add_argument('--distributed-backend', default='nccl',
-                       choices=['nccl', 'gloo'],
+                       choices=['nccl', 'gloo', 'xla'],
                        help='Which backend to use for distributed training.')
     group.add_argument('--DDP-impl', default='local',
                        choices=['local', 'torch'],
@@ -718,6 +719,10 @@ def _add_data_args(parser):
                        'end-of-document token.')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
+    
+    #GPT dataset generation argument
+    group.add_argument('--gpt-dataset-generation-only', type=bool, default=False, 
+                       help='Only generate dataset or run full training')
 
     return parser
 
