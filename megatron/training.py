@@ -17,6 +17,8 @@
 """Pretrain utilities."""
 
 from datetime import datetime
+import os
+import json
 import math
 import sys
 import time
@@ -53,6 +55,8 @@ from megatron.schedules import get_forward_backward_func
 from megatron.utils import report_memory
 import torch_xla.debug.profiler as xp
 import queue
+from os import path
+import numpy as np
 
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
@@ -490,6 +494,39 @@ def train_step(forward_step_func, data_iterator,
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
+class TrainingMetrics:
+    def __init__(self,json_file):
+        self.json_file = json_file
+
+    def read_modify_write_file(self, data):
+        """
+        data (dict): Data to update in the file.
+        """
+        result_dict = {}
+        print(f"Updating train metrics in provide {self.json_file} file")
+        if os.path.exists(self.json_file):
+            with open(self.json_file) as json_file:
+                result_dict = json.loads(json_file.read()) or {}
+                print(f"Current data: {result_dict}")
+        if result_dict:
+            try:
+                # handle internal named entity if present
+                result_dict[next(iter(result_dict))].update(data)
+            except Exception:
+                result_dict = data
+        else:
+            result_dict = data
+        print(f"Updating with data: {data}")
+        with open(self.json_file, 'w') as json_file:
+            json.dump(result_dict, json_file)
+
+    def update(self, **kwargs):
+        """
+        Write the Metrics to output file.
+        """
+        self.read_modify_write_file(kwargs)
+
+
 class Throughput:
     def __init__(self, batch_size, world_size, grad_accum_usteps, moving_avg_window_size):
         self.seqs_per_iteration = batch_size * world_size * grad_accum_usteps
@@ -497,6 +534,8 @@ class Throughput:
         self.moving_avg_window = queue.Queue()
         self.window_time = 0
         self.start_time = time.time()
+        self.throughput_peak = 0
+        self.throughput_sum = 0
 
     def get_throughput(self):
         step_time = time.time() - self.start_time
@@ -588,6 +627,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                        total_loss_dict[skipped_iters_key]
 
     throughput = thr.get_throughput()
+    throughput_peak = thr.throughput_peak
+    thr.throughput_sum += throughput
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0 ) and \
        is_last_rank():
@@ -691,6 +732,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             total_loss_dict[nan_iters_key])
         stats['nan_iterations'].append(total_loss_dict[nan_iters_key])
         log_string += ' throughput: {:.3f} |'.format(throughput)
+        if throughput > throughput_peak:
+            thr.throughput_peak = throughput
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
@@ -700,6 +743,29 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             report_memory('(after {} iterations)'.format(iteration))
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval, stats=stats)
+        if is_last_rank():
+            data_parallel_degree = mpu.get_data_parallel_world_size()
+            num_workers = data_parallel_degree * args.tensor_model_parallel_size * args.pipeline_model_parallel_size
+            last_loss = 0.0
+            if len(stats['lm_loss']) > 0:
+                last_loss = stats['lm_loss'][-1]
+            microsteps = iteration * args.global_batch_size // args.micro_batch_size
+            # TODO: for some reason, args.global_batch_size is emitted as 1 even
+            # though it is set to 64; is it related to batch size rampup?.
+            metrics = {"num_workers": num_workers,
+                       "data_parallel_degree": mpu.get_data_parallel_world_size(),
+                       "tensor_parallel_degree": args.tensor_model_parallel_size,
+                       "pipeline_parallel_degree": args.pipeline_model_parallel_size,
+                       "steps": iteration,
+                       "microsteps": microsteps,
+                       "loss": last_loss,
+                       "throughput_avg": thr.throughput_sum / iteration,
+                       "throughput_peak": thr.throughput_peak,
+                       "global_batch_size": args.global_batch_size,
+                       "batch_size": args.micro_batch_size,
+                       "max_length": args.seq_length}
+            tm = TrainingMetrics("/tmp/test_dict.json")
+            tm.update(**metrics)
 
     return report_memory_flag
 
