@@ -136,7 +136,7 @@ def pretrain_mp(rank, world_size):
     #xm.mark_step()
 
 if __name__ == '__main__':
-    world_size = int(os.environ['GPU_NUM_DEVICES'])
+    world_size = int(os.environ['NEURON_NUM_DEVICES'])
     xmp.spawn(pretrain_mp,
         args=(world_size,),
         nprocs=world_size,
