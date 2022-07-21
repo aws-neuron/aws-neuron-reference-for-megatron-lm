@@ -1,16 +1,17 @@
 #! /bin/bash
-
-# Runs the "345M" parameter model
-
+set -o pipefail
 
 DATA_PATH=~/examples_datasets/gpt2/my-gpt2_text_document
 CHECKPOINT_PATH=~/examples
-#export NEURON_EXTRACT_GRAPHS_ONLY=1
-#export NEURON_FALL_BACK_TO_NULL_NEFF=1
 
 export MASTER_ADDR='localhost'
 export MASTER_PORT=6000
 export NEURON_NUM_DEVICES=2
+
+TRAIN_ITERS=1000
+if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
+    TRAIN_ITERS=68
+fi
 
 python3 pretrain_gpt_mp.py  \
        --tensor-model-parallel-size 2 \
@@ -21,7 +22,7 @@ python3 pretrain_gpt_mp.py  \
        --global-batch-size 1 \
        --seq-length 2048 \
        --max-position-embeddings 2048 \
-       --train-iters 1000 \
+       --train-iters $TRAIN_ITERS \
        --no-masked-softmax-fusion \
        --no-bias-gelu-fusion \
        --no-bias-dropout-fusion \
@@ -45,6 +46,21 @@ python3 pretrain_gpt_mp.py  \
        --no-async-tensor-model-parallel-allreduce \
        --attention-dropout 0 \
        --hidden-dropout 0 \
-       --tensorboard-dir tb
+       --tensorboard-dir ./tb_gpt2_2layer_fp32 \
+    	|& tee run_log_gpt2_2layer_fp32
 
-#       --fp16
+ret_val=$?
+if [ $ret_val -eq 0 ]; then
+    success=1
+else
+    success=0
+fi
+
+dump_to_s3_update_json_scr=../../dump_to_s3_update_test_json.sh
+if [ -e $dump_to_s3_update_json_scr ]; then
+    $dump_to_s3_update_json_scr $@ --key=inference_success --value=$success || echo "Unable to update test result JSON."
+else
+    echo "WARNING: Script $dump_to_s3_update_json_scr not found. Not updating test result JSON."
+fi
+
+exit $ret_val
