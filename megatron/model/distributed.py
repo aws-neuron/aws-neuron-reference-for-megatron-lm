@@ -29,48 +29,40 @@ import os
 
 _ALLREDUCE_BUCKET_CAP_MB = 100
 
-#def bucket_allreduce(tensor_list):
-#    bucket_cap = int(os.getenv('BUCKET_CAP_KB', _ALLREDUCE_BUCKET_CAP_MB))*1024*1024
-#    # Reverse the gradients list so that we start allreduce from the last layer
-#    # onwards. This allows allreduce to trigger as soon as the bucket fills up and
-#    # overlap with backward pass.
-#    gradients = reversed(tensor_list)
-#    total = 0
-#    tensor_bucket = []
-#
-#    for grad in gradients:
-#        grad_bytes = grad.numel() * grad.element_size()
-#
-#        # Gradient is larger than bucket_cap, don't bucketize
-#        if grad_bytes > bucket_cap:
-#            # Flush out previous buckets even if they don't fill up
-#            # This maintains the strict reverse ordering
-#            if len(tensor_bucket):
-#                #print('flushing out:{} before large bytes:{}, bucket_cap:{}'.format(total, grad_bytes, bucket_cap))
-#                #xm.all_reduce(xm.REDUCE_SUM, tensor_bucket)
-#                xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
-#                total = 0
-#                tensor_bucket = []
-#            #print('large all-reduce')
-#            #xm.all_reduce(xm.REDUCE_SUM, [grad])
-#            xm.all_reduce('sum', [grad], groups = mpu.get_data_parallel_group()._mesh)
-#            continue
-#
-#        # Bucketize till the total spills over
-#        total += grad_bytes
-#        if total > bucket_cap:
-#            print('exceeded total:{}, bucket_cap:{}'.format(total, bucket_cap))
-#            #xm.all_reduce(xm.REDUCE_SUM, tensor_bucket)
-#            xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
-#            total = grad_bytes
-#            tensor_bucket = []
-#        tensor_bucket.append(grad)
-#
-#    # Flush the last remaining bucket
-#    if len(tensor_bucket):
-#        print('last bucket')
-#        #xm.all_reduce(xm.REDUCE_SUM, tensor_bucket)
-#        xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
+def bucket_allreduce(tensor_list):
+    bucket_cap = int(os.getenv('BUCKET_CAP_KB', _ALLREDUCE_BUCKET_CAP_MB))*1024*1024
+    # Reverse the gradients list so that we start allreduce from the last layer
+    # onwards. This allows allreduce to trigger as soon as the bucket fills up and
+    # overlap with backward pass.
+    gradients = reversed(tensor_list)
+    total = 0
+    tensor_bucket = []
+
+    for grad in gradients:
+        grad_bytes = grad.numel() * grad.element_size()
+
+        # Gradient is larger than bucket_cap, don't bucketize
+        if grad_bytes > bucket_cap:
+            # Flush out previous buckets even if they don't fill up
+            # This maintains the strict reverse ordering
+            if len(tensor_bucket):
+                xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
+                total = 0
+                tensor_bucket = []
+            xm.all_reduce('sum', [grad], groups = mpu.get_data_parallel_group()._mesh)
+            continue
+
+        # Bucketize till the total spills over
+        total += grad_bytes
+        if total > bucket_cap:
+            xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
+            total = grad_bytes
+            tensor_bucket = []
+        tensor_bucket.append(grad)
+
+    # Flush the last remaining bucket
+    if len(tensor_bucket):
+        xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
 
 
 class MemoryBuffer:
@@ -253,11 +245,10 @@ class DistributedDataParallel(DistributedDataParallelBase):
                         buckets[tp] = []
                     buckets[tp].append(param)
                     param.main_grad = param.grad
-            #TODO: return statement to be removed when TP + DP is enabled
-            return
+
             # For each bucket, all-reduce and copy all-reduced grads.
-            for tp in buckets:
-                bucket = buckets[tp]
-                grads = [param.grad.data for param in bucket]
-                #bucket_allreduce(grads)
-                return                
+            if mpu.get_data_parallel_world_size() > 1:
+                for tp in buckets:
+                    bucket = buckets[tp]
+                    grads = [param.grad.data for param in bucket]
+                    bucket_allreduce(grads)

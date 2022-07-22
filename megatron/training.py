@@ -53,7 +53,6 @@ from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.schedules import get_forward_backward_func
 from megatron.utils import report_memory
-import torch_xla.debug.profiler as xp
 import queue
 from os import path
 import numpy as np
@@ -126,7 +125,6 @@ def pretrain(train_valid_test_dataset_provider,
     #print_datetime('after megatron is initialized')
 
     args = get_args()
-    #server = xp.start_server(9012)
     #timers = get_timers()
    
     #Don't compile any hlos for dataset generation
@@ -424,7 +422,9 @@ def train_step(forward_step_func, data_iterator,
     if args.DDP_impl == 'local' and args.use_contiguous_buffers_in_local_ddp:
         for partition in model:
             partition.zero_grad_buffer()
-    optimizer.zero_grad()
+    #Allowing this alternate way of zero'ing gradient results in a NEFF reduction        
+    #optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=False)
 
     forward_backward_func = get_forward_backward_func()
     losses_reduced = forward_backward_func(
@@ -433,6 +433,8 @@ def train_step(forward_step_func, data_iterator,
     # Empty unused memory
     if args.empty_unused_memory_level >= 1:
         torch.cuda.empty_cache()
+
+    xm.mark_step() #adding this mark step alleviates memory pressure
 
     # All-reduce if needed.
     if args.DDP_impl == 'local':
@@ -552,7 +554,7 @@ class Throughput:
 
 def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
-                 grad_norm, params_norm, num_zeros_in_grad, thr):
+                 grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss):
     """Log training information such as losses, timing, ...."""
     # Add this to copy loss tensors to cpu:
     loss_dict = {key: value.cpu().item() for key, value in loss_dict.items()}
@@ -713,6 +715,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
                     stats['lm_loss'].append(avg)
+                #compare with golden for testing
+                if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+                    step_0start = iteration - 1
+                    if step_0start < len(golden_loss) and step_0start >= 0:
+                        np.testing.assert_allclose(avg, float(golden_loss[step_0start]), rtol=2e-1)
                 total_loss_dict[key] = torch.tensor(0.0, device='cpu')
         log_string += ' loss scale: {:.1f} |'.format(loss_scale)
         stats['loss_scale'].append(loss_scale)
@@ -759,7 +766,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                        "steps": iteration,
                        "microsteps": microsteps,
                        "loss": last_loss,
-                       "throughput_avg": thr.throughput_sum / iteration,
+                       "throughput_average": thr.throughput_sum / iteration,
                        "throughput_peak": thr.throughput_peak,
                        "global_batch_size": args.global_batch_size,
                        "batch_size": args.micro_batch_size,
@@ -803,8 +810,15 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
 
     timers('interval-time').start()
     print_datetime('before the start of training step')
-    report_memory_flag = True
-    throughput = Throughput(args.micro_batch_size, mpu.get_data_parallel_world_size(), args.global_batch_size, args.tensorboard_log_interval)
+    report_memory_flag = False # Avoid unnecessary resource prints. To add trn1 resources query once available..
+    #throughput = Throughput(args.micro_batch_size, get_num_microbatches(), args.global_batch_size, args.tensorboard_log_interval)
+    throughput = Throughput(args.micro_batch_size, mpu.get_data_parallel_world_size(), get_num_microbatches(), args.tensorboard_log_interval)
+    golden_loss_file = "./golden_loss.txt"
+    golden_loss = []
+    if path.exists(golden_loss_file):
+        with open(golden_loss_file, "r") as golden:
+            golden_loss = golden.readlines()
+        print("Loaded {} loss values from {}".format(str(len(golden_loss)), golden_loss_file))
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
@@ -825,7 +839,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             params_norm = calc_params_l2_norm(model)
         xm.add_step_closure(training_log, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale, report_memory_flag, skipped_iter,
-                                          grad_norm, params_norm, num_zeros_in_grad, throughput))
+                                          grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss))
         #XLA uses add_step_closure instead 
         #report_memory_flag = training_log(loss_dict, total_loss_dict,
         #                                  optimizer.param_groups[0]['lr'],

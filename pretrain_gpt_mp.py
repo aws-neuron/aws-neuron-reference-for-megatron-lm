@@ -34,6 +34,8 @@ import torch_xla.debug.metrics as met
 
 import torch_xla.debug.profiler as xp
 
+os.environ["NEURON_CC_FLAGS"] = "--model-type transformer"
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
@@ -85,12 +87,13 @@ def loss_func(loss_mask, output_tensor):
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-
-    # Reduce loss for logging.
-    #averaged_loss = average_losses_across_data_parallel_group([loss])
-
-    #return loss, {'lm loss': averaged_loss[0]}
-    return loss, {'lm loss': loss}
+    
+    if mpu.get_data_parallel_world_size() > 1:
+        # Reduce loss for logging.
+        averaged_loss = average_losses_across_data_parallel_group([loss])
+        return loss, {'lm loss': averaged_loss[0]}
+    else:
+        return loss, {'lm loss': loss}
 
 
 def forward_step(data_iterator, model):
