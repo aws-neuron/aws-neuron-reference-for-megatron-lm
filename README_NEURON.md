@@ -1,1 +1,0 @@
-This Megatron-LM library (source https://github.com/NVIDIA/Megatron-LM) is adapted for use with AWS Trainium via Neuron SDK. Please see Neuron SDK documentation for tutorial on using Megatron-LM on AWS Trainium.
