@@ -181,11 +181,11 @@ def pretrain(train_valid_test_dataset_provider,
                           train_data_iterator, valid_data_iterator)
     #print_datetime('after training is done')
 
-    #if args.do_valid:
-    #    prefix = 'the end of training for val data'
-    #    evaluate_and_print_results(prefix, forward_step_func,
-    #                               valid_data_iterator, model,
-    #                               iteration, False)
+    if args.do_valid:
+        prefix = 'the end of training for val data'
+        evaluate_and_print_results(prefix, forward_step_func,
+                                   valid_data_iterator, model,
+                                   iteration, False)
 
     #if args.save and iteration != 0:
     #    save_checkpoint(iteration, model, optimizer, lr_scheduler)
@@ -555,6 +555,23 @@ class Throughput:
 def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
                  grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss):
+    args = get_args()
+    timers = get_timers()
+    writer = get_tensorboard_writer()
+    assert args.tensorboard_log_interval == args.log_interval, "We want both intervals to overlap to synchronize fetching Loss tensors from device!!"
+
+    # Advanced, skipped, and Nan iterations.
+    advanced_iters_key = 'advanced iterations'
+
+    assert skipped_iter == 0
+    # Advanced iterations.
+    total_loss_dict[advanced_iters_key] = total_loss_dict.get(
+        advanced_iters_key, 0) + 1
+    
+    # Return immediately and avoid device synchronization
+    if iteration % args.tensorboard_log_interval != 0:
+        return
+
     """Log training information such as losses, timing, ...."""
     # Add this to copy loss tensors to cpu:
     loss_dict = {key: value.cpu().item() for key, value in loss_dict.items()}
@@ -562,73 +579,14 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     params_norm = params_norm.item() if params_norm is not None else params_norm
     num_zeros_in_grad = num_zeros_in_grad.item() if num_zeros_in_grad is not None else num_zeros_in_grad
     loss_scale = loss_scale.item() if loss_scale is not None else loss_scale
-    args = get_args()
-    timers = get_timers()
-    writer = get_tensorboard_writer()
-
-    # Advanced, skipped, and Nan iterations.
-    advanced_iters_key = 'advanced iterations'
-    skipped_iters_key = 'skipped iterations'
-    nan_iters_key = 'nan iterations'
-    # Advanced iterations.
-    if not skipped_iter:
-        total_loss_dict[advanced_iters_key] = total_loss_dict.get(
-            advanced_iters_key, 0) + 1
-    else:
-        if advanced_iters_key not in total_loss_dict:
-            total_loss_dict[advanced_iters_key] = 0
-    # Skipped iterations.
-    total_loss_dict[skipped_iters_key] = total_loss_dict.get(
-        skipped_iters_key, 0) + skipped_iter
-    # Update losses and set nan iterations
-    got_nan = False
-    for key in loss_dict:
-        if not skipped_iter:
-            # total_loss_dict[key] = total_loss_dict.get(
-            #     key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
-            total_loss_dict[key] = total_loss_dict.get(
-                key, torch.tensor(0.0, device='cpu')) + loss_dict[key]
-        else:
-            value = loss_dict[key].float().sum().item()
-            is_nan = value == float('inf') or \
-                     value == -float('inf') or \
-                     value != value
-            got_nan = got_nan or is_nan
-    total_loss_dict[nan_iters_key] = total_loss_dict.get(
-        nan_iters_key, 0) + int(got_nan)
-
-    # Logging.
-    timers_to_log = []
-
-    def add_to_logging(name):
-        if name in timers.timers:
-            timers_to_log.append(name)
-    add_to_logging('forward-compute')
-    add_to_logging('forward-recv')
-    add_to_logging('forward-send')
-    add_to_logging('forward-backward-send-forward-backward-recv')
-    add_to_logging('backward-compute')
-    add_to_logging('backward-recv')
-    add_to_logging('backward-send')
-    add_to_logging('backward-send-forward-recv')
-    add_to_logging('backward-send-backward-recv')
-    add_to_logging('backward-params-all-reduce')
-    add_to_logging('backward-embedding-all-reduce')
-    add_to_logging('optimizer-copy-to-main-grad')
-    add_to_logging('optimizer-unscale-and-check-inf')
-    add_to_logging('optimizer-clip-main-grad')
-    add_to_logging('optimizer-copy-main-to-model-params')
-    add_to_logging('optimizer')
-    add_to_logging('batch-generator')
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * args.data_parallel_size * \
         get_num_microbatches()
 
-    total_iterations = total_loss_dict[advanced_iters_key] + \
-                       total_loss_dict[skipped_iters_key]
+    total_iterations = total_loss_dict[advanced_iters_key]
 
-    throughput = thr.get_throughput()
+    throughput = thr.get_throughput()   
     throughput_peak = thr.throughput_peak
     thr.throughput_sum += throughput
     # Tensorboard values.
@@ -666,26 +624,6 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             writer.add_scalar('throughput', throughput, iteration)
             writer.add_scalar('throughput vs samples', throughput, 
                               args.consumed_train_samples)
-        if args.log_timers_to_tensorboard:
-            timers.write(timers_to_log, writer, iteration,
-                         normalizer=total_iterations)
-        if args.log_memory_to_tensorboard:
-            mem_stats = torch.cuda.memory_stats()
-            writer.add_scalar(
-                "mem-reserved-bytes",
-                mem_stats["reserved_bytes.all.current"],
-                iteration,
-            )
-            writer.add_scalar(
-                "mem-allocated-bytes",
-                mem_stats["allocated_bytes.all.current"],
-                iteration,
-            )
-            writer.add_scalar(
-                "mem-allocated-count",
-                mem_stats["allocation.all.current"],
-                iteration,
-            )
 
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed()
@@ -708,9 +646,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         log_string += ' global batch size: {:5d} |'.format(batch_size)
         stats['global_batch_size'].append(batch_size)
         for key in total_loss_dict:
-            if key not in [advanced_iters_key, skipped_iters_key,
-                           nan_iters_key]:
-                avg = total_loss_dict[key].item() / \
+            if key not in [advanced_iters_key]:
+                avg = total_loss_dict[key].cpu().item() / \
                       float(max(1, total_loss_dict[advanced_iters_key]))
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
@@ -720,9 +657,6 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                     step_0start = iteration - 1
                     if step_0start < len(golden_loss) and step_0start >= 0:
                         np.testing.assert_allclose(avg, float(golden_loss[step_0start]), rtol=2e-1)
-                total_loss_dict[key] = torch.tensor(0.0, device='cpu')
-        log_string += ' loss scale: {:.1f} |'.format(loss_scale)
-        stats['loss_scale'].append(loss_scale)
         if grad_norm is not None:
             log_string += ' grad norm: {:.3f} |'.format(grad_norm)
             stats['grad_norm'].append(grad_norm)
@@ -732,24 +666,15 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         if params_norm is not None:
             log_string += ' params norm: {:.3f} |'.format(params_norm)
             stats['params_norm'].append(params_norm)
-        log_string += ' number of skipped iterations: {:3d} |'.format(
-            total_loss_dict[skipped_iters_key])
-        stats['skipped_iterations'].append(total_loss_dict[skipped_iters_key])
-        log_string += ' number of nan iterations: {:3d} |'.format(
-            total_loss_dict[nan_iters_key])
-        stats['nan_iterations'].append(total_loss_dict[nan_iters_key])
         log_string += ' throughput: {:.3f} |'.format(throughput)
         if throughput > throughput_peak:
             thr.throughput_peak = throughput
         total_loss_dict[advanced_iters_key] = 0
-        total_loss_dict[skipped_iters_key] = 0
-        total_loss_dict[nan_iters_key] = 0
         print_rank_last(log_string)
         if report_memory_flag and learning_rate > 0.:
             # Report memory after optimizer state has been initialized.
             report_memory('(after {} iterations)'.format(iteration))
             report_memory_flag = False
-        timers.log(timers_to_log, normalizer=args.log_interval, stats=stats)
         if is_last_rank():
             data_parallel_degree = mpu.get_data_parallel_world_size()
             num_workers = data_parallel_degree * args.tensor_model_parallel_size * args.pipeline_model_parallel_size
@@ -819,6 +744,9 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         with open(golden_loss_file, "r") as golden:
             golden_loss = golden.readlines()
         print("Loaded {} loss values from {}".format(str(len(golden_loss)), golden_loss_file))
+
+    iteration_d = torch.IntTensor([0]).to(xm.xla_device())
+
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
@@ -837,9 +765,17 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
+            
+        for key in loss_dict:
+            total_loss_dict[key] = total_loss_dict.get(
+                key, torch.FloatTensor([0.0]).to(xm.xla_device()))
+            total_loss_dict[key] = torch.where(iteration_d % args.log_interval == 0, loss_dict[key], loss_dict[key] + total_loss_dict[key])
+        iteration_d = iteration_d + 1
+
         xm.add_step_closure(training_log, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale, report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss))
+
         #XLA uses add_step_closure instead 
         #report_memory_flag = training_log(loss_dict, total_loss_dict,
         #                                  optimizer.param_groups[0]['lr'],
@@ -950,17 +886,18 @@ def evaluate_and_print_results(prefix, forward_step_func,
     writer = get_tensorboard_writer()
 
     total_loss_dict = evaluate(forward_step_func, data_iterator, model, verbose)
+    total_loss_dict = {key: value.item() for key, value in total_loss_dict.items()}
     string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
-        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
-        ppl = math.exp(min(20, total_loss_dict[key].item()))
+        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key])
+        ppl = math.exp(min(20, total_loss_dict[key]))
         string += '{} PPL: {:.6E} | '.format(key, ppl)
         if writer:
             writer.add_scalar('{} validation'.format(key),
-                              total_loss_dict[key].item(),
+                              total_loss_dict[key],
                               iteration)
             writer.add_scalar('{} validation vs samples'.format(key),
-                              total_loss_dict[key].item(),
+                              total_loss_dict[key],
                               args.consumed_train_samples)
             if args.log_validation_ppl_to_tensorboard:
                 writer.add_scalar('{} validation ppl'.format(key), ppl,
