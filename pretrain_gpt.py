@@ -27,17 +27,22 @@ from megatron.model import GPTModel, ModelType
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
+import torch_xla.core.xla_model as xm
+import os
+
+os.environ["NEURON_CC_FLAGS"] = "--model-type transformer"
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
+    device = xm.xla_device()
     print_rank_0('building GPT model ...')
     model = GPTModel(
         num_tokentypes=0,
         parallel_output=True,
         pre_process=pre_process,
         post_process=post_process
-    )
+    ).to(device)
     return model
 
 
@@ -55,10 +60,12 @@ def get_batch(data_iterator):
         data = next(data_iterator)
     else:
         data = None
-    data_b = mpu.broadcast_data(keys, data, datatype)
+    #data_b = mpu.broadcast_data(keys, data, datatype)
+    data_b = data
 
     # Unpack.
-    tokens_ = data_b['text'].long()
+    #tokens_ = data_b['text'].long()
+    tokens_ = data_b['text'].int()
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
@@ -93,7 +100,6 @@ def forward_step(data_iterator, model):
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
         data_iterator)
     timers('batch-generator').stop()
-
     output_tensor = model(tokens, position_ids, attention_mask,
                           labels=labels)
 
@@ -115,12 +121,10 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
         seed=args.seed,
         skip_warmup=(not args.mmap_warmup))
     print_rank_0("> finished creating GPT datasets ...")
-
     return train_ds, valid_ds, test_ds
 
 
-if __name__ == "__main__":
-
+if __name__ == '__main__':
     pretrain(train_valid_test_datasets_provider, model_provider,
              ModelType.encoder_or_decoder,
              forward_step, args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
