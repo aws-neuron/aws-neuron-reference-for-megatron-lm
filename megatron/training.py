@@ -747,7 +747,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
 
     iteration_d = torch.IntTensor([0]).to(xm.xla_device())
 
-    while iteration < args.train_iters:
+    while iteration <= args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
@@ -769,8 +769,8 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         for key in loss_dict:
             total_loss_dict[key] = total_loss_dict.get(
                 key, torch.FloatTensor([0.0]).to(xm.xla_device()))
-            total_loss_dict[key] = torch.where(iteration_d % args.log_interval == 0, loss_dict[key], loss_dict[key] + total_loss_dict[key])
-        iteration_d = iteration_d + 1
+            total_loss_dict[key] = torch.where(iteration_d % args.log_interval == 0, loss_dict[key].detach(), loss_dict[key].detach() + total_loss_dict[key].detach())
+        iteration_d = iteration_d.detach() + 1
 
         xm.add_step_closure(training_log, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale, report_memory_flag, skipped_iter,
