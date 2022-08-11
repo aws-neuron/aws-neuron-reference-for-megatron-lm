@@ -33,7 +33,7 @@ from megatron.global_vars import set_global_variables
 from megatron.mpu import (set_tensor_model_parallel_rank,
                           set_tensor_model_parallel_world_size)
 
-import torch_xla.neuron.distributed  # for XLA backend
+import torch_xla.distributed.xla_backend  # for XLA backend
 import torch_xla.core.xla_model as xm
 #(TODO)getting global worldsize, change to local, assuming TP only for now
 torch.cuda.device_count = lambda : xm.xrt_world_size()
