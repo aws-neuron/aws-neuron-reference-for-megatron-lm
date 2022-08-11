@@ -9,6 +9,7 @@ export MASTER_PORT=6000
 export NEURON_NUM_DEVICES=32
 
 export OMP_NUM_THREADS=1
+export TF_NUM_INTEROP_THREADS=1
 export TF_NUM_INTRAOP_THREADS=1
 export XLA_IO_THREAD_POOL_SIZE=2
 export XLA_THREAD_POOL_SIZE=2
@@ -22,7 +23,6 @@ export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
 export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
 export NEURON_RT_STOCHASTIC_ROUNDING_EN=1
 export XLA_USE_BF16=1
-export NEURON_CC_FLAGS="--model-type transformer"
 
 #This flag will be made default in future
 export XLA_TRANSFER_SCALAR_ASYNC=1
@@ -33,7 +33,7 @@ export XLA_TRANSFER_SCALAR_ASYNC=1
 
 TRAIN_ITERS=10000
 if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
-    TRAIN_ITERS=68
+    TRAIN_ITERS=125
 fi
 
 python3 pretrain_gpt_mp.py \
@@ -51,7 +51,7 @@ python3 pretrain_gpt_mp.py \
     --vocab-file ~/examples_datasets/gpt2/gpt2-vocab.json \
     --merge-file ~/examples_datasets/gpt2/gpt2-merges.txt \
     --data-impl mmap \
-    --split 100,0,0 \
+    --split 90,10,0 \
     --distributed-backend xla \
     --lr 0.00015 \
     --lr-decay-style cosine \
@@ -60,17 +60,16 @@ python3 pretrain_gpt_mp.py \
     --clip-grad 1 \
     --lr-warmup-fraction .01 \
     --log-interval 1 \
-    --eval-interval 1000 \
-    --eval-iters 10 \
-    --attention-dropout 0 \
-    --hidden-dropout 0 \
+    --tensorboard-log-interval 1 \
+    --eval-interval $TRAIN_ITERS \
+    --eval-iters 1000 \
     --no-masked-softmax-fusion \
     --no-bias-gelu-fusion \
     --no-bias-dropout-fusion \
     --no-async-tensor-model-parallel-allreduce \
     --no-contiguous-buffers-in-local-ddp \
     --tensorboard-dir ./tb_gpt2_24layer_bf16 \
-    |& tee run_log_gpt2_24layer_bf16
+    |& tee run_log_gpt2_24layer_bf16_prod
 
 ret_val=$?
 if [ $ret_val -eq 0 ]; then

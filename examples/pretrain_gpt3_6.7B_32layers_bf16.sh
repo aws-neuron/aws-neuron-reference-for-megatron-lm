@@ -22,10 +22,10 @@ export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
 export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
 export NEURON_RT_STOCHASTIC_ROUNDING_EN=1
 export XLA_USE_BF16=1
-export NEURON_CC_FLAGS="--model-type transformer"
 
 #This flag will be made default in future
 export XLA_TRANSFER_SCALAR_ASYNC=1
+export NEURON_CC_FLAGS="--internal-hlo-remat --model-type transformer"
 
 #Turning this on results in a hang after tracing, but need it
 #to enable softmax lowering
@@ -33,12 +33,12 @@ export XLA_TRANSFER_SCALAR_ASYNC=1
 
 TRAIN_ITERS=10000
 if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
-    TRAIN_ITERS=68
+    TRAIN_ITERS=125
 fi
 
 python3 pretrain_gpt_mp.py \
     --tensor-model-parallel-size 8 \
-    --num-layers 24 \
+    --num-layers 32 \
     --hidden-size 4096 \
     --num-attention-heads 32 \
     --micro-batch-size 1 \
