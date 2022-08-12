@@ -39,6 +39,7 @@ def bucket_allreduce(tensor_list):
     tensor_bucket = []
 
     for grad in gradients:
+        grad.data /= mpu.get_data_parallel_world_size()
         grad_bytes = grad.numel() * grad.element_size()
 
         # Gradient is larger than bucket_cap, don't bucketize
