@@ -136,6 +136,7 @@ def pretrain_mp(rank, world_size):
     pretrain(train_valid_test_datasets_provider, model_provider,
              ModelType.encoder_or_decoder,
              forward_step, args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
+    xm.rendezvous('ending')
     #xm.mark_step()
 
 if __name__ == '__main__':
