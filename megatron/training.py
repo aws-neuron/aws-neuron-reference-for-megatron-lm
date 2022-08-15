@@ -418,6 +418,11 @@ def train_step(forward_step_func, data_iterator,
     args = get_args()
     timers = get_timers()
 
+    if 'TORCHXLA_PROFILE_PORT' in os.environ :
+      port = int(os.environ['TORCHXLA_PROFILE_PORT'])
+      import torch_xla.debug.profiler as xp
+      server = xp.start_server(port)
+
     # Set grad to zero.
     if args.DDP_impl == 'local' and args.use_contiguous_buffers_in_local_ddp:
         for partition in model:
