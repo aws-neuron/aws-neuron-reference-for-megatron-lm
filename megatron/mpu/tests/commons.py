@@ -19,14 +19,8 @@ import random
 import numpy
 import torch
 
-<<<<<<< HEAD:megatron/mpu/tests/commons.py
-import mpu
-
-=======
-#import mpu
 from megatron import mpu
 import torch_xla.distributed.xla_backend #for XLA backend
->>>>>>> e8760f8... edit for torch-xla v1.11 upgrade:megatron-lm/megatron/mpu/tests/commons.py
 
 class IdentityLayer(torch.nn.Module):
     def __init__(self, size, scale=1.0):
