@@ -26,6 +26,7 @@ import torch_xla.core.xla_model as xm
 from megatron import (get_args,
                       mpu,
                       print_rank_0,
+                      print_rank_2D,
                       update_num_microbatches,
                       utils)
 
@@ -131,10 +132,12 @@ def read_metadata(tracker_filename):
     assert iteration > 0 or release, 'error parsing metadata file {}'.format(
         tracker_filename)
 
+    max_iter = iteration
+    # Commenting out the code as it deadlocks with staggered checkpointing strategy
     # Get the max iteration retrieved across the ranks.
-    iters_cuda = torch.cuda.LongTensor([iteration])
-    torch.distributed.all_reduce(iters_cuda, op=torch.distributed.ReduceOp.MAX, async_op=True)
-    max_iter = iters_cuda[0].item()
+    # iters_cuda = torch.cuda.LongTensor([iteration])
+    # torch.distributed.all_reduce(iters_cuda, op=torch.distributed.ReduceOp.MAX, async_op=True)
+    # max_iter = iters_cuda[0].item()
 
     # We should now have all the same iteration.
     # If not, print a warning and chose the maximum
@@ -147,6 +150,42 @@ def read_metadata(tracker_filename):
     return max_iter, release
 
 
+def save(data, file_or_path):
+  """Saves the input data into a file.
+
+  The saved data is transferred to PyTorch CPU device before being saved, so a
+  following `torch.load()` will load CPU data.
+  Care must be taken when working with views. Instead of saving views it's
+  recommended that you recreate them after the tensors have been loaded and
+  moved to their destination device(s).
+
+  Args:
+    data: The input data to be saved. Any nested combination of Python objects
+      (list, tuples, sets, dicts, ...).
+    file_or_path: The destination for the data saving operation. Either a file
+      path or a Python file object. If `master_only` is ``False`` the path or
+      file objects must point to different destinations as otherwise all the
+      writes from the same host will override each other.
+  """
+  should_chkpt = True if mpu.get_data_parallel_rank() == 0 else False
+  cpu_data = xm._maybe_convert_to_cpu(data, convert=should_chkpt)
+
+  for tp_rank in range(0, mpu.get_tensor_model_parallel_world_size()):
+      my_tp_rank = mpu.get_tensor_model_parallel_rank()
+      should_write_data = True if mpu.get_data_parallel_rank() == 0 and my_tp_rank == tp_rank else False
+
+      #Staggering save checkpoints
+      if should_write_data:
+          print_rank_2D('file_or_path:{}'.format(file_or_path))
+          ensure_directory_exists(file_or_path)
+          torch.save(cpu_data, file_or_path)
+
+      xm.rendezvous(f'chktp-save-{tp_rank}')
+
+      if should_write_data:
+          print_rank_2D('successfully saved checkpoint')
+
+
 def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     """Save a model checkpoint."""
     args = get_args()
@@ -157,66 +196,57 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     print_rank_0('saving checkpoint at iteration {:7d} to {}'.format(
         iteration, args.save))
 
-    if not torch.distributed.is_initialized() or mpu.get_data_parallel_rank() == 0:
-        # Arguments, iteration, and model.
-        state_dict = {}
-        args_dict = vars(args)
+    # Arguments, iteration, and model.
+    state_dict = {}
+    args_dict = vars(args)
 
-        #saving only necessary args, TODO(Debug Checkpointing generating extra hlos)
-        for arg in _ARGS_TO_SAVE:
-            state_dict[arg] = args_dict[arg]
-        if args.vocab_file:
-            state_dict['max_position_embeddings'] = args_dict['max_position_embeddings']
-            state_dict['make_vocab_size_divisible_by'] = args_dict['make_vocab_size_divisible_by']
-            state_dict['padded_vocab_size'] = args_dict['padded_vocab_size']
-            state_dict['tokenizer_type'] = args_dict['tokenizer_type']
+    #saving only necessary args, TODO(Debug Checkpointing generating extra hlos)
+    for arg in _ARGS_TO_SAVE:
+        state_dict[arg] = args_dict[arg]
+    if args.vocab_file:
+        state_dict['max_position_embeddings'] = args_dict['max_position_embeddings']
+        state_dict['make_vocab_size_divisible_by'] = args_dict['make_vocab_size_divisible_by']
+        state_dict['padded_vocab_size'] = args_dict['padded_vocab_size']
+        state_dict['tokenizer_type'] = args_dict['tokenizer_type']
 
-        state_dict['checkpoint_version'] = 3.0
-        state_dict['iteration'] = iteration
-        
-        if len(model) == 1:
-            state_dict['model'] = model[0].state_dict_for_save_checkpoint()
-        else:
-            for i in range(len(model)):
-                mpu.set_virtual_pipeline_model_parallel_rank(i)
-                state_dict['model%d' % i] = model[i].state_dict_for_save_checkpoint()
+    state_dict['checkpoint_version'] = 3.0
+    state_dict['iteration'] = iteration
+    
+    if len(model) == 1:
+        state_dict['model'] = model[0].state_dict_for_save_checkpoint()
+    else:
+        for i in range(len(model)):
+            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            state_dict['model%d' % i] = model[i].state_dict_for_save_checkpoint()
 
-        # Optimizer stuff.
-        if not args.no_save_optim:
-            if optimizer is not None:
-                state_dict['optimizer'] = optimizer.state_dict()
-            if lr_scheduler is not None:
-                state_dict['lr_scheduler'] = lr_scheduler.state_dict()
+    # Optimizer stuff.
+    if not args.no_save_optim:
+        if optimizer is not None:
+            state_dict['optimizer'] = optimizer.state_dict()
+        if lr_scheduler is not None:
+            state_dict['lr_scheduler'] = lr_scheduler.state_dict()
 
-        # RNG states.
-        if not args.no_save_rng:
-            print_rank_0("saving_rng")
-            state_dict['random_rng_state'] = random.getstate()
-            rng_state = state_dict['random_rng_state']
-            print_rank_0(str(type(state_dict['random_rng_state'])))
-            print_rank_0("after rng type")
-            for r in rng_state:
-                print_rank_0(str(type(r)))
-            state_dict['np_rng_state'] = np.random.get_state()
-            state_dict['torch_rng_state'] = torch.get_rng_state()
-            state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
-            state_dict['rng_tracker_states'] \
-                = mpu.get_cuda_rng_tracker().get_states()
+    # RNG states.
+    if not args.no_save_rng:
+        print_rank_0("saving_rng")
+        state_dict['random_rng_state'] = random.getstate()
+        rng_state = state_dict['random_rng_state']
+        print_rank_0(str(type(state_dict['random_rng_state'])))
+        print_rank_0("after rng type")
+        for r in rng_state:
+            print_rank_0(str(type(r)))
+        state_dict['np_rng_state'] = np.random.get_state()
+        state_dict['torch_rng_state'] = torch.get_rng_state()
+        state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
+        state_dict['rng_tracker_states'] \
+            = mpu.get_cuda_rng_tracker().get_states()
 
-        # Save.
-        checkpoint_name = get_checkpoint_name(args.save, iteration)
-        ensure_directory_exists(checkpoint_name)
-        #torch.save(state_dict, checkpoint_name)
-        #Compatibility with XLA needs xm.save instead of torch.save
-        #TODO(Debug Checkpointing generating extra hlos)
-        xm.save(state_dict, checkpoint_name, master_only=False)
-
+    checkpoint_name = get_checkpoint_name(args.save, iteration)
+    save(state_dict, checkpoint_name)
+    # we don;t need this barrier as save above has it
     # Wait so everyone is done (necessary)
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    print_rank_0('  successfully saved checkpoint at iteration {:7d} to {}'.format(
-        iteration, args.save))
+    #if torch.distributed.is_initialized():
+    #    torch.distributed.barrier()
 
     # And update the latest iteration
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
@@ -224,9 +254,11 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
         with open(tracker_filename, 'w') as f:
             f.write(str(iteration))
 
+    # Replace torch barrier with rendezvous
     # Wait so everyone is done (not necessary)
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
+    #if torch.distributed.is_initialized():
+    #    torch.distributed.barrier()
+    xm.rendezvous('Checkpoint Done')
 
 def _transpose_first_dim(t, num_splits, num_splits_first, model):
     input_shape = t.size()

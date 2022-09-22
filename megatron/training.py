@@ -38,6 +38,7 @@ from megatron import update_num_microbatches
 from megatron import mpu
 from megatron import print_rank_0
 from megatron import print_rank_last
+from megatron import print_rank_2D
 from megatron.checkpointing import load_checkpoint
 from megatron.checkpointing import save_checkpoint
 from megatron.model import Float16Module
@@ -384,14 +385,15 @@ def setup_model_and_optimizer(model_provider_func, model_type):
 
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
-    if args.load is not None:
+    if args.load is not None and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
         timers = get_timers()
-        # Extra barrier is added to make sure all ranks report the
-        # max time.
-        torch.distributed.barrier()
         timers('load-checkpoint').start()
-        args.iteration = load_checkpoint(model, optimizer, lr_scheduler)
-        torch.distributed.barrier()
+        #Staggering load checkpoints
+        for i in range(0, mpu.get_tensor_model_parallel_world_size()):
+            if mpu.get_tensor_model_parallel_rank() == i:
+                args.iteration = load_checkpoint(model, optimizer, lr_scheduler)
+            xm.rendezvous(f'load-chkpt-phase-{i}')
+            print_rank_2D(f'Finished Loading Phase-{i}')
         timers('load-checkpoint').stop()
         timers.log(['load-checkpoint'])
     else:
@@ -581,7 +583,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     # Add this to copy loss tensors to cpu:
     loss_dict = {key: value.cpu().item() for key, value in loss_dict.items()}
     grad_norm = grad_norm.item() if grad_norm is not None else grad_norm
-    params_norm = params_norm.item() if params_norm is not None else params_norm
+    #params_norm = params_norm.item() if params_norm is not None else params_norm
     num_zeros_in_grad = num_zeros_in_grad.item() if num_zeros_in_grad is not None else num_zeros_in_grad
     loss_scale = loss_scale.item() if loss_scale is not None else loss_scale
 
@@ -804,7 +806,8 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         # Checkpointing
         saved_checkpoint = False
         if args.save and args.save_interval and \
-           iteration % args.save_interval == 0:
+           iteration % args.save_interval == 0 and \
+            not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
             save_checkpoint_and_time(iteration, model, optimizer,
                                      lr_scheduler)
             saved_checkpoint = True
