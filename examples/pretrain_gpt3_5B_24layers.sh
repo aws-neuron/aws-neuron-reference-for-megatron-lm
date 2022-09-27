@@ -39,8 +39,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --weight-decay 1e-2 \
     --clip-grad 1 \
     --lr-warmup-fraction .01 \
-    --log-interval 4 \
-    --tensorboard-log-interval 4 \
+    --log-interval 1 \
+    --tensorboard-log-interval 1 \
     --eval-interval $TRAIN_ITERS \
     --eval-iters 1000 \
     --attention-dropout 0 \

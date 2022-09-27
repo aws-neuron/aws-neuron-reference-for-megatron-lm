@@ -39,8 +39,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --weight-decay 1e-2 \
     --clip-grad 1 \
     --lr-warmup-fraction .01 \
-    --log-interval 4 \
-    --tensorboard-log-interval 4 \
+    --log-interval 1 \
+    --tensorboard-log-interval 1 \
     --eval-interval $TRAIN_ITERS \
     --eval-iters 1000 \
     --attention-dropout 0 \
@@ -50,8 +50,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --no-bias-dropout-fusion \
     --no-async-tensor-model-parallel-allreduce \
     --no-contiguous-buffers-in-local-ddp \
-    --tensorboard-dir ./tb_gpt3_24layer_bf16 \
-    |& tee run_log_gpt3_24layer_bf16
+    --tensorboard-dir ./tb_gpt3_32layer_bf16 \
+    |& tee run_log_gpt3_32layer_bf16
 
 if [ $ret_val -eq 0 ]; then
     success=1

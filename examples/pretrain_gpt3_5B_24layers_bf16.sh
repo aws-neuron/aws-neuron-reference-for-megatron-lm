@@ -10,7 +10,6 @@ export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
 export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
 
 export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
-export NEURON_RT_STOCHASTIC_ROUNDING_EN=1
 export XLA_USE_BF16=1
 export NEURON_CC_FLAGS="--model-type transformer"
 
@@ -34,7 +33,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --vocab-file ~/examples_datasets/gpt2/gpt2-vocab.json \
     --merge-file ~/examples_datasets/gpt2/gpt2-merges.txt \
     --data-impl mmap \
-    --split 90,10,0 \
+    --split 100,0,0 \
     --distributed-backend xla \
     --lr 0.00015 \
     --lr-decay-style cosine \
@@ -42,8 +41,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --weight-decay 1e-2 \
     --clip-grad 1 \
     --lr-warmup-fraction .01 \
-    --log-interval 4 \
-    --tensorboard-log-interval 4 \
+    --log-interval 1 \
+    --tensorboard-log-interval 1 \
     --eval-interval $TRAIN_ITERS \
     --eval-iters 1000 \
     --attention-dropout 0 \
