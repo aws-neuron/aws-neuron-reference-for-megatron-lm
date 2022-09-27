@@ -10,7 +10,6 @@ export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
 export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
 
 export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
-export NEURON_RT_STOCHASTIC_ROUNDING_EN=1
 export XLA_USE_BF16=1
 export NEURON_CC_FLAGS="--model-type transformer"
 
@@ -42,19 +41,19 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --weight-decay 1e-2 \
     --clip-grad 1 \
     --lr-warmup-fraction .01 \
-    --log-interval 4 \
-    --tensorboard-log-interval 4 \
+    --log-interval 1 \
+    --tensorboard-log-interval 1 \
     --eval-interval $TRAIN_ITERS \
     --eval-iters 1000 \
     --attention-dropout 0 \
-    --hidden-dropout 0 \    
+    --hidden-dropout 0 \
     --no-masked-softmax-fusion \
     --no-bias-gelu-fusion \
     --no-bias-dropout-fusion \
     --no-async-tensor-model-parallel-allreduce \
     --no-contiguous-buffers-in-local-ddp \
-    --tensorboard-dir ./tb_gpt3_24layer_bf16 \
-    |& tee run_log_gpt3_24layer_bf16
+    --tensorboard-dir ./tb_gpt3_32layer_bf16 \
+    |& tee run_log_gpt3_32layer_bf16
 
 if [ $ret_val -eq 0 ]; then
     success=1
