@@ -28,7 +28,11 @@ from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
 import os
+import torch_xla.debug.metrics as met
+
+import torch_xla.debug.profiler as xp
 
 os.environ["NEURON_CC_FLAGS"] = "--model-type transformer"
 
@@ -83,7 +87,7 @@ def loss_func(loss_mask, output_tensor):
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-
+    
     if mpu.get_data_parallel_world_size() > 1:
         # Reduce loss for logging.
         averaged_loss = average_losses_across_data_parallel_group([loss])
@@ -126,7 +130,18 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
     return train_ds, valid_ds, test_ds
 
 
-if __name__ == '__main__':
+def pretrain_mp(rank, world_size):
+    os.environ['RANK'] = str(rank)
+    os.environ['WORLD_SIZE'] = str(world_size)
     pretrain(train_valid_test_datasets_provider, model_provider,
              ModelType.encoder_or_decoder,
              forward_step, args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
+    xm.rendezvous('ending')
+    #xm.mark_step()
+
+if __name__ == '__main__':
+    world_size = int(os.environ['NEURON_NUM_DEVICES'])
+    xmp.spawn(pretrain_mp,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True)

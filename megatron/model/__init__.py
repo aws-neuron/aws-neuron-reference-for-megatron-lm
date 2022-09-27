@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
-from .fused_layer_norm import MixedFusedLayerNorm as LayerNorm
+#from .fused_layer_norm import MixedFusedLayerNorm as LayerNorm
+from torch.nn import LayerNorm
 
 from .distributed import DistributedDataParallel
 from .bert_model import BertModel

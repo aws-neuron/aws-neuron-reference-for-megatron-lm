@@ -20,6 +20,9 @@ from abc import abstractmethod
 
 import torch
 
+import torch_xla.core.xla_model as xm
+torch.cuda.FloatTensor = lambda t: torch.FloatTensor(t).to(xm.xla_device())
+torch.cuda.IntTensor = lambda t: torch.IntTensor(t).to(xm.xla_device())
 
 class MegatronGradScaler(ABC):
 
@@ -128,6 +131,7 @@ class DynamicGradScaler(MegatronGradScaler):
 
 
     def load_state_dict(self, state_dict):
-        self._scale = state_dict['scale'].cuda(torch.cuda.current_device())
+        #self._scale = state_dict['scale'].cuda(torch.cuda.current_device())
+        self._scale = state_dict['scale'].to(xm.xla_device())
         self._growth_tracker = state_dict['growth_tracker']
         self._hysteresis_tracker = state_dict['hysteresis_tracker']

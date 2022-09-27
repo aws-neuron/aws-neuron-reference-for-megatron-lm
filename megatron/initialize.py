@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Megatron initialization."""
 
@@ -31,6 +32,12 @@ from megatron import mpu
 from megatron.global_vars import set_global_variables
 from megatron.mpu import (set_tensor_model_parallel_rank,
                           set_tensor_model_parallel_world_size)
+
+import torch_xla.distributed.xla_backend  # for XLA backend
+import torch_xla.core.xla_model as xm
+#(TODO)getting global worldsize, change to local, assuming TP only for now
+torch.cuda.device_count = lambda : xm.xrt_world_size()
+torch.cuda.set_device = lambda x: None
 
 
 def initialize_megatron(extra_args_provider=None, args_defaults={},
@@ -65,7 +72,8 @@ def initialize_megatron(extra_args_provider=None, args_defaults={},
         _set_random_seed(args.seed)
 
     # Set pytorch JIT layer fusion options.
-    _set_jit_fusion_options()
+    #Commenting out fusion
+    #_set_jit_fusion_options()
 
     args = get_args()
     if  args.lazy_mpu_init:
@@ -85,7 +93,8 @@ def initialize_megatron(extra_args_provider=None, args_defaults={},
         _init_autoresume()
 
         # Compile dependencies.
-        _compile_dependencies()
+        # commenting out any cuda compile dependencies
+        #_compile_dependencies()
 
         # No continuation function
         return None

@@ -193,11 +193,11 @@ def test_column_parallel_linear(tensor_model_parallel_size):
 
     seed = 12345
     set_random_seed(seed)
-    input_size_coeff = 13
+    input_size_coeff = 3
     input_size = input_size_coeff * tensor_model_parallel_size
-    output_size_coeff = 17
+    output_size_coeff = 7
     output_size = output_size_coeff * tensor_model_parallel_size
-    batch_size = 7
+    batch_size = 1
 
     # Network
     identity_layer = IdentityLayer2D(batch_size, input_size).cuda()
@@ -210,7 +210,6 @@ def test_column_parallel_linear(tensor_model_parallel_size):
     loss = torch.mul(output, loss_weight).sum()
     # Backward
     loss.backward()
-
     # Values.
     dLdY = loss_weight
     X = identity_layer.weight
@@ -226,7 +225,7 @@ def test_column_parallel_linear(tensor_model_parallel_size):
     torch.distributed.barrier()
     print('   error in dLdA on global rank {}: {}'.format(
         torch.distributed.get_rank(), error))
-    assert error < 1.0e-6
+    assert error < 1.0e-6, 'error: {}'.format(error)
 
     my_dLdb = torch.split(dLdb, output_size_coeff,
                           dim=0)[rank].contiguous().clone()
@@ -234,13 +233,13 @@ def test_column_parallel_linear(tensor_model_parallel_size):
     torch.distributed.barrier()
     print('   error in dLdb on global rank {}: {}'.format(
         torch.distributed.get_rank(), error))
-    assert error < 1.0e-6
+    assert error < 1.0e-6, 'error: {}'.format(error)
 
     error = dLdX.sub(identity_layer.weight.grad).abs().max()
     torch.distributed.barrier()
     print('   error in dLdX on global rank {}: {}'.format(
         torch.distributed.get_rank(), error))
-    assert error < 1.0e-6
+    assert error < 1.0e-6, 'error: {}'.format(error)
 
     # Reset groups
     mpu.destroy_model_parallel()
@@ -300,7 +299,6 @@ def test_row_parallel_linear(tensor_model_parallel_size):
     print('   error in dLdb on global rank {}: {}'.format(
         torch.distributed.get_rank(), error))
     assert error < 1.0e-6
-
     error = dLdX.sub(identity_layer.weight.grad).abs().max()
     torch.distributed.barrier()
     print('   error in dLdX on global rank {}: {}'.format(

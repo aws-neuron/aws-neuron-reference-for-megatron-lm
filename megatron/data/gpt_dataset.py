@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """GPT style dataset."""
 
@@ -27,6 +28,7 @@ from megatron.data.dataset_utils import get_datasets_weights_and_num_samples
 from megatron.data.dataset_utils import get_train_valid_test_split_
 from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
 
+import torch_xla.core.xla_model as xm
 
 def build_train_valid_test_datasets(data_prefix, data_impl, splits_string,
                                     train_valid_test_num_samples,
@@ -292,16 +294,19 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
             np.save(shuffle_idx_filename, shuffle_idx, allow_pickle=True)
             print_rank_0(' > elasped time to build and save shuffle-idx mapping'
                          ' (seconds): {:4f}'.format(time.time() - start_time))
+    # Sync to give time for rank=0 to finish building shuffle-idx mapping files
+    xm.rendezvous('shuffle_idx_mapping')
 
     # This should be a barrier but nccl barrier assumes
     # device_index=rank which is not the case for model
     # parallel case
-    counts = torch.cuda.LongTensor([1])
-    torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
-    torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_group())
-    assert counts[0].item() == (
-        torch.distributed.get_world_size() //
-        torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
+    #(TODO), uncomment later once dataset generation is streamlined
+    #counts = torch.cuda.LongTensor([1])
+    #torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
+    #torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_group())
+    #assert counts[0].item() == (
+    #    torch.distributed.get_world_size() //
+    #    torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
 
     # Load mappings.
     start_time = time.time()

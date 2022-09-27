@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Input/output checkpointing."""
 
@@ -19,16 +20,20 @@ import os
 import random
 import sys
 import numpy as np
-
 import torch
+import torch_xla.core.xla_model as xm
 
 from megatron import (get_args,
                       mpu,
                       print_rank_0,
+                      print_rank_2D,
                       update_num_microbatches,
                       utils)
 
 _CHECKPOINT_VERSION = None
+_ARGS_TO_SAVE =  { 'num_layers', 'hidden_size', 'num_attention_heads', 'tensor_model_parallel_size', \
+                    'consumed_train_samples', 'consumed_valid_samples', 'pipeline_model_parallel_size' }
+
 
 def set_checkpoint_version(value):
     global _CHECKPOINT_VERSION
@@ -37,9 +42,11 @@ def set_checkpoint_version(value):
             "checkpoint versions do not match"
     _CHECKPOINT_VERSION = value
 
+
 def get_checkpoint_version():
     global _CHECKPOINT_VERSION
     return _CHECKPOINT_VERSION
+
 
 def check_checkpoint_args(checkpoint_args):
     """Ensure fixed arguments for a model are the same for the input
@@ -50,7 +57,8 @@ def check_checkpoint_args(checkpoint_args):
         if old_arg_name is not None:
             checkpoint_value = getattr(checkpoint_args, old_arg_name)
         else:
-            checkpoint_value = getattr(checkpoint_args, arg_name)
+            #checkpoint_value = getattr(checkpoint_args, arg_name)
+            checkpoint_value = checkpoint_args[arg_name]
         args_value = getattr(args, arg_name)
         error_message = '{} value from checkpoint ({}) is not equal to the ' \
                         'input argument value ({}).'.format(
@@ -124,10 +132,12 @@ def read_metadata(tracker_filename):
     assert iteration > 0 or release, 'error parsing metadata file {}'.format(
         tracker_filename)
 
+    max_iter = iteration
+    # Commenting out the code as it deadlocks with staggered checkpointing strategy
     # Get the max iteration retrieved across the ranks.
-    iters_cuda = torch.cuda.LongTensor([iteration])
-    torch.distributed.all_reduce(iters_cuda, op=torch.distributed.ReduceOp.MAX)
-    max_iter = iters_cuda[0].item()
+    # iters_cuda = torch.cuda.LongTensor([iteration])
+    # torch.distributed.all_reduce(iters_cuda, op=torch.distributed.ReduceOp.MAX, async_op=True)
+    # max_iter = iters_cuda[0].item()
 
     # We should now have all the same iteration.
     # If not, print a warning and chose the maximum
@@ -140,6 +150,42 @@ def read_metadata(tracker_filename):
     return max_iter, release
 
 
+def save(data, file_or_path):
+  """Saves the input data into a file.
+
+  The saved data is transferred to PyTorch CPU device before being saved, so a
+  following `torch.load()` will load CPU data.
+  Care must be taken when working with views. Instead of saving views it's
+  recommended that you recreate them after the tensors have been loaded and
+  moved to their destination device(s).
+
+  Args:
+    data: The input data to be saved. Any nested combination of Python objects
+      (list, tuples, sets, dicts, ...).
+    file_or_path: The destination for the data saving operation. Either a file
+      path or a Python file object. If `master_only` is ``False`` the path or
+      file objects must point to different destinations as otherwise all the
+      writes from the same host will override each other.
+  """
+  should_chkpt = True if mpu.get_data_parallel_rank() == 0 else False
+  cpu_data = xm._maybe_convert_to_cpu(data, convert=should_chkpt)
+
+  for tp_rank in range(0, mpu.get_tensor_model_parallel_world_size()):
+      my_tp_rank = mpu.get_tensor_model_parallel_rank()
+      should_write_data = True if mpu.get_data_parallel_rank() == 0 and my_tp_rank == tp_rank else False
+
+      #Staggering save checkpoints
+      if should_write_data:
+          print_rank_2D('file_or_path:{}'.format(file_or_path))
+          ensure_directory_exists(file_or_path)
+          torch.save(cpu_data, file_or_path)
+
+      xm.rendezvous(f'chktp-save-{tp_rank}')
+
+      if should_write_data:
+          print_rank_2D('successfully saved checkpoint')
+
+
 def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     """Save a model checkpoint."""
     args = get_args()
@@ -150,47 +196,57 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     print_rank_0('saving checkpoint at iteration {:7d} to {}'.format(
         iteration, args.save))
 
-    if not torch.distributed.is_initialized() or mpu.get_data_parallel_rank() == 0:
+    # Arguments, iteration, and model.
+    state_dict = {}
+    args_dict = vars(args)
 
-        # Arguments, iteration, and model.
-        state_dict = {}
-        state_dict['args'] = args
-        state_dict['checkpoint_version'] = 3.0
-        state_dict['iteration'] = iteration
-        if len(model) == 1:
-            state_dict['model'] = model[0].state_dict_for_save_checkpoint()
-        else:
-            for i in range(len(model)):
-                mpu.set_virtual_pipeline_model_parallel_rank(i)
-                state_dict['model%d' % i] = model[i].state_dict_for_save_checkpoint()
+    #saving only necessary args, TODO(Debug Checkpointing generating extra hlos)
+    for arg in _ARGS_TO_SAVE:
+        state_dict[arg] = args_dict[arg]
+    if args.vocab_file:
+        state_dict['max_position_embeddings'] = args_dict['max_position_embeddings']
+        state_dict['make_vocab_size_divisible_by'] = args_dict['make_vocab_size_divisible_by']
+        state_dict['padded_vocab_size'] = args_dict['padded_vocab_size']
+        state_dict['tokenizer_type'] = args_dict['tokenizer_type']
 
-        # Optimizer stuff.
-        if not args.no_save_optim:
-            if optimizer is not None:
-                state_dict['optimizer'] = optimizer.state_dict()
-            if lr_scheduler is not None:
-                state_dict['lr_scheduler'] = lr_scheduler.state_dict()
+    state_dict['checkpoint_version'] = 3.0
+    state_dict['iteration'] = iteration
+    
+    if len(model) == 1:
+        state_dict['model'] = model[0].state_dict_for_save_checkpoint()
+    else:
+        for i in range(len(model)):
+            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            state_dict['model%d' % i] = model[i].state_dict_for_save_checkpoint()
 
-        # RNG states.
-        if not args.no_save_rng:
-            state_dict['random_rng_state'] = random.getstate()
-            state_dict['np_rng_state'] = np.random.get_state()
-            state_dict['torch_rng_state'] = torch.get_rng_state()
-            state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
-            state_dict['rng_tracker_states'] \
-                = mpu.get_cuda_rng_tracker().get_states()
+    # Optimizer stuff.
+    if not args.no_save_optim:
+        if optimizer is not None:
+            state_dict['optimizer'] = optimizer.state_dict()
+        if lr_scheduler is not None:
+            state_dict['lr_scheduler'] = lr_scheduler.state_dict()
 
-        # Save.
-        checkpoint_name = get_checkpoint_name(args.save, iteration)
-        ensure_directory_exists(checkpoint_name)
-        torch.save(state_dict, checkpoint_name)
+    # RNG states.
+    if not args.no_save_rng:
+        print_rank_0("saving_rng")
+        state_dict['random_rng_state'] = random.getstate()
+        rng_state = state_dict['random_rng_state']
+        print_rank_0(str(type(state_dict['random_rng_state'])))
+        print_rank_0("after rng type")
+        for r in rng_state:
+            print_rank_0(str(type(r)))
+        state_dict['np_rng_state'] = np.random.get_state()
+        state_dict['torch_rng_state'] = torch.get_rng_state()
+        state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
+        state_dict['rng_tracker_states'] \
+            = mpu.get_cuda_rng_tracker().get_states()
 
+    checkpoint_name = get_checkpoint_name(args.save, iteration)
+    save(state_dict, checkpoint_name)
+    # we don;t need this barrier as save above has it
     # Wait so everyone is done (necessary)
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    print_rank_0('  successfully saved checkpoint at iteration {:7d} to {}'.format(
-        iteration, args.save))
+    #if torch.distributed.is_initialized():
+    #    torch.distributed.barrier()
 
     # And update the latest iteration
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
@@ -198,9 +254,11 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
         with open(tracker_filename, 'w') as f:
             f.write(str(iteration))
 
+    # Replace torch barrier with rendezvous
     # Wait so everyone is done (not necessary)
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
+    #if torch.distributed.is_initialized():
+    #    torch.distributed.barrier()
+    xm.rendezvous('Checkpoint Done')
 
 def _transpose_first_dim(t, num_splits, num_splits_first, model):
     input_shape = t.size()
@@ -276,6 +334,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
         :attr:`state_dict` of the checkpoint match the names of
         parameters and buffers in model.
     """
+    # print_rank_0("loading")
     args = get_args()
     load_dir = getattr(args, load_arg)
 
@@ -337,20 +396,6 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
                                  checkpoint_name))
                 sys.exit()
 
-    # Check arguments.
-    assert args.consumed_train_samples == 0
-    assert args.consumed_valid_samples == 0
-    if 'args' in state_dict:
-        checkpoint_args = state_dict['args']
-        check_checkpoint_args(checkpoint_args)
-        args.consumed_train_samples = getattr(checkpoint_args,
-                                              'consumed_train_samples', 0)
-        update_num_microbatches(consumed_samples=args.consumed_train_samples)
-        args.consumed_valid_samples = getattr(checkpoint_args,
-                                              'consumed_valid_samples', 0)
-    else:
-        print_rank_0('could not find arguments in the checkpoint ...')
-
     # Model.
     if len(model) == 1:
         model[0].load_state_dict(state_dict['model'], strict=strict)
@@ -358,6 +403,33 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
         for i in range(len(model)):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
             model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
+    
+    # Check arguments.
+    assert args.consumed_train_samples == 0
+    assert args.consumed_valid_samples == 0
+
+    #if 'args' in state_dict:
+    # loading only the args we need to verify
+    checkpoint_args = {}
+    for k, v in state_dict.items():
+        if k in _ARGS_TO_SAVE:
+            checkpoint_args[k] = v
+
+    #vocab file only args
+    if args.vocab_file:
+        checkpoint_args['max_position_embeddings'] = state_dict['max_position_embeddings']
+        checkpoint_args['make_vocab_size_divisible_by'] = state_dict['make_vocab_size_divisible_by']
+        checkpoint_args['padded_vocab_size'] = state_dict['padded_vocab_size']
+        checkpoint_args['tokenizer_type'] = state_dict['tokenizer_type']
+        
+    check_checkpoint_args(checkpoint_args)
+    args.consumed_train_samples = int(getattr(checkpoint_args,
+                                            'consumed_train_samples', 0))
+    update_num_microbatches(consumed_samples=args.consumed_train_samples)
+    args.consumed_valid_samples = int(getattr(checkpoint_args,
+                                            'consumed_valid_samples', 0))
+    #else:
+    #    print_rank_0('could not find arguments in the checkpoint ...')
 
     # Fix up query/key/value matrix ordering if needed
     checkpoint_version = get_checkpoint_version()
@@ -381,7 +453,14 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
     # rng states.
     if not release and not args.finetune and not args.no_load_rng:
         try:
-            random.setstate(state_dict['random_rng_state'])
+            #Converting random rng state from list to tuple for compatibility
+            #(TODO) Error when loading rng random states checkpointing 
+            rng_state = state_dict['random_rng_state']
+            for i in range(len(rng_state)):
+                if type(rng_state[i]) is list:
+                    rng_state[i] = tuple(rng_state[i])
+            print_rank_0(tuple(rng_state))
+            random.setstate(tuple(rng_state))
             np.random.set_state(state_dict['np_rng_state'])
             torch.set_rng_state(state_dict['torch_rng_state'])
             torch.cuda.set_rng_state(state_dict['cuda_rng_state'])
@@ -445,4 +524,5 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         print(' successfully loaded {}'.format(checkpoint_name))
 
     return model
+
 

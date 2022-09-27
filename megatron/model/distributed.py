@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 from abc import ABC
 from abc import abstractmethod
@@ -22,7 +23,47 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from megatron import get_args
 from megatron import mpu
 from .module import MegatronModule
+import torch_xla.core.xla_model as xm
 
+import os
+
+_ALLREDUCE_BUCKET_CAP_MB = 100
+
+def bucket_allreduce(tensor_list):
+    bucket_cap = int(os.getenv('BUCKET_CAP_KB', _ALLREDUCE_BUCKET_CAP_MB))*1024*1024
+    # Reverse the gradients list so that we start allreduce from the last layer
+    # onwards. This allows allreduce to trigger as soon as the bucket fills up and
+    # overlap with backward pass.
+    gradients = reversed(tensor_list)
+    total = 0
+    tensor_bucket = []
+
+    for grad in gradients:
+        grad.data /= mpu.get_data_parallel_world_size()
+        grad_bytes = grad.numel() * grad.element_size()
+
+        # Gradient is larger than bucket_cap, don't bucketize
+        if grad_bytes > bucket_cap:
+            # Flush out previous buckets even if they don't fill up
+            # This maintains the strict reverse ordering
+            if len(tensor_bucket):
+                xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
+                total = 0
+                tensor_bucket = []
+            xm.all_reduce('sum', [grad], groups = mpu.get_data_parallel_group()._mesh)
+            continue
+
+        # Bucketize till the total spills over
+        total += grad_bytes
+        if total > bucket_cap:
+            xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
+            total = grad_bytes
+            tensor_bucket = []
+        tensor_bucket.append(grad)
+
+    # Flush the last remaining bucket
+    if len(tensor_bucket):
+        xm.all_reduce('sum', tensor_bucket, groups = mpu.get_data_parallel_group()._mesh)
 
 
 class MemoryBuffer:
@@ -199,20 +240,16 @@ class DistributedDataParallel(DistributedDataParallelBase):
             # Pack the buckets.
             for param in self.module.parameters():
                 if param.requires_grad and param.grad is not None:
-                    tp = param.data.type()
+                    #tp = param.data.type()
+                    tp = param.dtype
                     if tp not in buckets:
                         buckets[tp] = []
                     buckets[tp].append(param)
                     param.main_grad = param.grad
 
             # For each bucket, all-reduce and copy all-reduced grads.
-            for tp in buckets:
-                bucket = buckets[tp]
-                grads = [param.grad.data for param in bucket]
-                coalesced = _flatten_dense_tensors(grads)
-                coalesced /= mpu.get_data_parallel_world_size()
-                torch.distributed.all_reduce(
-                    coalesced, group=mpu.get_data_parallel_group())
-                for buf, synced in zip(grads, _unflatten_dense_tensors(
-                        coalesced, grads)):
-                    buf.copy_(synced)
+            if mpu.get_data_parallel_world_size() > 1:
+                for tp in buckets:
+                    bucket = buckets[tp]
+                    grads = [param.grad.data for param in bucket]
+                    bucket_allreduce(grads)

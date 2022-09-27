@@ -32,6 +32,7 @@ _GLOBAL_TENSORBOARD_WRITER = None
 _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 
+torch.cuda.synchronize = lambda: None
 
 def get_args():
     """Return arguments."""
@@ -246,7 +247,7 @@ class Timers:
             value = self.timers[name].elapsed(reset=reset) / normalizer
             writer.add_scalar(name + '-time', value, iteration)
 
-    def log(self, names, normalizer=1.0, reset=True):
+    def log(self, names, normalizer=1.0, reset=True, stats=None):
         """Log a group of timers."""
         assert normalizer > 0.0
         string = 'time (ms)'
@@ -254,6 +255,8 @@ class Timers:
             elapsed_time = self.timers[name].elapsed(
                 reset=reset) * 1000.0 / normalizer
             string += ' | {}: {:.2f}'.format(name, elapsed_time)
+            if stats != None:
+                stats[name].append(elapsed_time)
         if torch.distributed.is_initialized():
             if torch.distributed.get_rank() == (
                     torch.distributed.get_world_size() - 1):

@@ -19,8 +19,8 @@ import random
 import numpy
 import torch
 
-import mpu
-
+from megatron import mpu
+import torch_xla.distributed.xla_backend #for XLA backend
 
 class IdentityLayer(torch.nn.Module):
     def __init__(self, size, scale=1.0):

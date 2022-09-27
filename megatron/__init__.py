@@ -23,6 +23,7 @@ from .global_vars import get_tensorboard_writer
 from .global_vars import get_adlr_autoresume
 from .global_vars import get_timers
 from .initialize  import initialize_megatron
+from .mpu.initialize import get_tensor_model_parallel_rank, get_data_parallel_rank
 
 def print_rank_0(message):
     """If distributed is initialized, print only on rank 0."""
@@ -41,5 +42,14 @@ def print_rank_last(message):
     if torch.distributed.is_initialized():
         if is_last_rank():
             print(message, flush=True)
+    else:
+        print(message, flush=True)
+
+def print_rank_2D(message):
+    """If distributed is initialized, print only on rank 0."""
+    if torch.distributed.is_initialized():
+        tp_rank = get_tensor_model_parallel_rank()
+        dp_rank = get_data_parallel_rank()
+        print(f'tp:{tp_rank},dp:{dp_rank}:'+message, flush=True)
     else:
         print(message, flush=True)

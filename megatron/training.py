@@ -1,4 +1,4 @@
-# coding=utf-8
+#coding=utf-8
 # Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,10 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications copyright Amazon Web Services and its affiliates. All rights reserved.
 
 """Pretrain utilities."""
 
 from datetime import datetime
+import os
+import json
 import math
 import sys
 import time
@@ -35,6 +38,7 @@ from megatron import update_num_microbatches
 from megatron import mpu
 from megatron import print_rank_0
 from megatron import print_rank_last
+from megatron import print_rank_2D
 from megatron.checkpointing import load_checkpoint
 from megatron.checkpointing import save_checkpoint
 from megatron.model import Float16Module
@@ -50,7 +54,19 @@ from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.schedules import get_forward_backward_func
 from megatron.utils import report_memory
+import queue
+from os import path
+import numpy as np
 
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
+torch.cuda.DoubleTensor = lambda t: torch.DoubleTensor(t).to(xm.xla_device())
+torch.cuda.FloatTensor = lambda t: torch.FloatTensor(t).to(xm.xla_device())
+torch.cuda.IntTensor = lambda t: torch.IntTensor(t).to(xm.xla_device())
+torch.cuda.LongTensor = lambda t: torch.LongTensor(t).to(xm.xla_device())
+torch.cuda.current_device = lambda: xm.xla_device() 
+
+stats = {'iteration': [], 'consumed_samples': [], 'time': [], 'learning_rate': [], 'global_batch_size': [], 'lm_loss': [], 'loss_scale': [], 'grad_norm': [], 'skipped_iterations': [], 'nan_iterations': [],'forward-compute': [], 'backward-compute': [], 'backward-params-all-reduce': [], 'backward-embedding-all-reduce': [], 'optimizer-copy-to-main-grad': [], 'optimizer-unscale-and-check-inf': [], 'optimizer-clip-main-grad': [], 'optimizer-copy-main-to-model-params': [], 'optimizer': [], 'batch-generator': [], 'params_norm':[]}
 
 
 def print_datetime(string):
@@ -93,59 +109,78 @@ def pretrain(train_valid_test_dataset_provider,
 
     # Initalize and get arguments, timers, and Tensorboard writer.
     initialize_megatron(extra_args_provider=extra_args_provider,
-                        args_defaults=args_defaults)
+                        args_defaults=args_defaults, allow_no_cuda=True)
+#                        args_defaults=args_defaults)
 
     # Adjust the startup time so it reflects the largest value.
     # This will be closer to what scheduler will see (outside of
     # image ... launches.
-    global _TRAIN_START_TIME
-    start_time_tensor = torch.cuda.DoubleTensor([_TRAIN_START_TIME])
-    torch.distributed.all_reduce(start_time_tensor,
-                                 op=torch.distributed.ReduceOp.MIN)
-    _TRAIN_START_TIME = start_time_tensor.item()
-    print_rank_0('time to initialize megatron (seconds): {:.3f}'.format(
-        time.time() - _TRAIN_START_TIME))
-    print_datetime('after megatron is initialized')
+    #global _TRAIN_START_TIME
+    #start_time_tensor = torch.cuda.DoubleTensor([_TRAIN_START_TIME])
+    #start_time_tensor = xm.all_reduce('min', start_time_tensor)
+    #torch.distributed.all_reduce(start_time_tensor,
+    #                             op=torch.distributed.ReduceOp.MIN)
+    #_TRAIN_START_TIME = start_time_tensor.item()
+    #print_rank_0('time to initialize megatron (seconds): {:.3f}'.format(
+    #    time.time() - _TRAIN_START_TIME))
+    #print_datetime('after megatron is initialized')
 
     args = get_args()
-    timers = get_timers()
+    #timers = get_timers()
+   
+    #Don't compile any hlos for dataset generation
+    if args.gpt_dataset_generation_only == True:
+        os.environ['NEURON_EXTRACT_GRAPHS_ONLY'] = "1"
+        os.environ['NEURON_FALL_BACK_TO_NULL_NEFF'] = "1"
+    
+    #Only generate dataset for rank 0
+    if mpu.get_tensor_model_parallel_rank() != 0 and args.gpt_dataset_generation_only == True:
+        return
 
     # Model, optimizer, and learning rate.
-    timers('model-and-optimizer-setup').start()
+    #timers('model-and-optimizer-setup').start()
     model, optimizer, lr_scheduler = setup_model_and_optimizer(model_provider,
                                                                model_type)
-    timers('model-and-optimizer-setup').stop()
-    print_datetime('after model, optimizer, and learning rate '
-                   'scheduler are built')
+    #timers('model-and-optimizer-setup').stop()
+    #print_datetime('after model, optimizer, and learning rate '
+    #               'scheduler are built')
 
     # Data stuff.
-    timers('train/valid/test-data-iterators-setup').start()
-    if args.virtual_pipeline_model_parallel_size is not None:
-        all_data_iterators = [
-            build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
-            for _ in range(len(model))
-        ]
-        train_data_iterator = [data_iterators[0] for data_iterators in all_data_iterators]
-        valid_data_iterator = [data_iterators[1] for data_iterators in all_data_iterators]
-        test_data_iterator = [data_iterators[2] for data_iterators in all_data_iterators]
-    else:
-        train_data_iterator, valid_data_iterator, test_data_iterator \
-            = build_train_valid_test_data_iterators(
-                train_valid_test_dataset_provider)
-    timers('train/valid/test-data-iterators-setup').stop()
-    print_datetime('after dataloaders are built')
+    #timers('train/valid/test-data-iterators-setup').start()
+    if (args.gpt_dataset_generation_only == True and mpu.get_tensor_model_parallel_rank() == 0) \
+        or args.gpt_dataset_generation_only == False:    
+        if args.virtual_pipeline_model_parallel_size is not None:
+            all_data_iterators = [
+                build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+                for _ in range(len(model))
+            ]
+            train_data_iterator = [data_iterators[0] for data_iterators in all_data_iterators]
+            valid_data_iterator = [data_iterators[1] for data_iterators in all_data_iterators]
+            test_data_iterator = [data_iterators[2] for data_iterators in all_data_iterators]
+        else:
+            train_data_iterator, valid_data_iterator, test_data_iterator \
+                = build_train_valid_test_data_iterators(
+                    train_valid_test_dataset_provider)
+    #timers('train/valid/test-data-iterators-setup').stop()
+    #print_datetime('after dataloaders are built')
 
     # Print setup timing.
-    print_rank_0('done with setup ...')
-    timers.log(['model-and-optimizer-setup', 'train/valid/test-data-iterators-setup'])
-    print_rank_0('training ...')
+    #print_rank_0('done with setup ...')
+    #timers.log(['model-and-optimizer-setup', 'train/valid/test-data-iterators-setup'])
+    #print_rank_0('training ...')
+   
+    #Do not start training step if we only want to generate dataset
+    if args.gpt_dataset_generation_only == True:
+        return  
 
     iteration = 0
-    if args.do_train and args.train_iters > 0:
+    #if args.do_train and args.train_iters > 0:
+    #TODO: after data iterators done, check for args.do_train
+    if args.train_iters > 0:
         iteration = train(forward_step_func,
                           model, optimizer, lr_scheduler,
                           train_data_iterator, valid_data_iterator)
-    print_datetime('after training is done')
+    #print_datetime('after training is done')
 
     if args.do_valid:
         prefix = 'the end of training for val data'
@@ -153,16 +188,17 @@ def pretrain(train_valid_test_dataset_provider,
                                    valid_data_iterator, model,
                                    iteration, False)
 
-    if args.save and iteration != 0:
-        save_checkpoint(iteration, model, optimizer, lr_scheduler)
+    #if args.save and iteration != 0:
+    #    save_checkpoint(iteration, model, optimizer, lr_scheduler)
 
-    if args.do_test:
-        # Run on test data.
-        prefix = 'the end of training for test data'
-        evaluate_and_print_results(prefix, forward_step_func,
-                                   test_data_iterator, model,
-                                   0, True)
+    #if args.do_test:
+    #    # Run on test data.
+    #    prefix = 'the end of training for test data'
+    #    evaluate_and_print_results(prefix, forward_step_func,
+    #                               test_data_iterator, model,
+    #                               0, True)
 
+    return stats
 def update_train_iters(args):
 
     # For iteration-based training, we don't need to do anything
@@ -266,7 +302,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # GPU allocation.
     for model_module in model:
-        model_module.cuda(torch.cuda.current_device())
+        #model_module.cuda(torch.cuda.current_device())
+        model_module.to(xm.xla_device())
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
@@ -280,6 +317,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                      for model_module in model]
 
         elif args.DDP_impl == 'local':
+            print('accum grads in fp32:{}, use_contiguous_buffers:{},'.format(args.accumulate_allreduce_grads_in_fp32,args.use_contiguous_buffers_in_local_ddp))
             model = [LocalDDP(model_module,
                               args.accumulate_allreduce_grads_in_fp32,
                               args.use_contiguous_buffers_in_local_ddp)
@@ -347,14 +385,15 @@ def setup_model_and_optimizer(model_provider_func, model_type):
 
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
-    if args.load is not None:
+    if args.load is not None and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
         timers = get_timers()
-        # Extra barrier is added to make sure all ranks report the
-        # max time.
-        torch.distributed.barrier()
         timers('load-checkpoint').start()
-        args.iteration = load_checkpoint(model, optimizer, lr_scheduler)
-        torch.distributed.barrier()
+        #Staggering load checkpoints
+        for i in range(0, mpu.get_tensor_model_parallel_world_size()):
+            if mpu.get_tensor_model_parallel_rank() == i:
+                args.iteration = load_checkpoint(model, optimizer, lr_scheduler)
+            xm.rendezvous(f'load-chkpt-phase-{i}')
+            print_rank_2D(f'Finished Loading Phase-{i}')
         timers('load-checkpoint').stop()
         timers.log(['load-checkpoint'])
     else:
@@ -381,33 +420,41 @@ def train_step(forward_step_func, data_iterator,
     args = get_args()
     timers = get_timers()
 
+    if 'TORCHXLA_PROFILE_PORT' in os.environ :
+      port = int(os.environ['TORCHXLA_PROFILE_PORT'])
+      import torch_xla.debug.profiler as xp
+      server = xp.start_server(port)
+
     # Set grad to zero.
     if args.DDP_impl == 'local' and args.use_contiguous_buffers_in_local_ddp:
         for partition in model:
             partition.zero_grad_buffer()
-    optimizer.zero_grad()
+    #Allowing this alternate way of zero'ing gradient results in a NEFF reduction        
+    #optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=False)
 
     forward_backward_func = get_forward_backward_func()
     losses_reduced = forward_backward_func(
         forward_step_func, data_iterator, model,
         optimizer, timers, forward_only=False)
-
     # Empty unused memory
     if args.empty_unused_memory_level >= 1:
         torch.cuda.empty_cache()
 
+    xm.mark_step() #adding this mark step alleviates memory pressure
+
     # All-reduce if needed.
     if args.DDP_impl == 'local':
-        timers('backward-params-all-reduce').start()
+        #timers('backward-params-all-reduce').start()
         for model_module in model:
             model_module.allreduce_gradients()
-        timers('backward-params-all-reduce').stop()
+        #timers('backward-params-all-reduce').stop()
 
     # All-reduce word_embeddings' grad across first and last stages to ensure
     # that word_embeddings parameters stay in sync.
     # This should only run for models that support pipelined model parallelism
     # (BERT and GPT-2).
-    timers('backward-embedding-all-reduce').start()
+    #timers('backward-embedding-all-reduce').start()
     if mpu.is_rank_in_embedding_group(ignore_virtual=True) and \
             mpu.get_pipeline_model_parallel_world_size() > 1:
         if mpu.is_pipeline_first_stage(ignore_virtual=True):
@@ -426,12 +473,11 @@ def train_step(forward_step_func, data_iterator,
             else:
                 grad = word_embeddings_weight.grad
             torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
-    timers('backward-embedding-all-reduce').stop()
-
+    #timers('backward-embedding-all-reduce').stop()
     # Update parameters.
-    timers('optimizer').start()
+    #timers('optimizer').start()
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    timers('optimizer').stop()
+    #timers('optimizer').stop()
 
     # Update learning rate.
     if update_successful:
@@ -457,74 +503,99 @@ def train_step(forward_step_func, data_iterator,
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
+class TrainingMetrics:
+    def __init__(self,json_file):
+        self.json_file = json_file
+
+    def read_modify_write_file(self, data):
+        """
+        data (dict): Data to update in the file.
+        """
+        result_dict = {}
+        print(f"Updating train metrics in provide {self.json_file} file")
+        if os.path.exists(self.json_file):
+            with open(self.json_file) as json_file:
+                result_dict = json.loads(json_file.read()) or {}
+                print(f"Current data: {result_dict}")
+        if result_dict:
+            try:
+                # handle internal named entity if present
+                result_dict[next(iter(result_dict))].update(data)
+            except Exception:
+                result_dict = data
+        else:
+            result_dict = data
+        print(f"Updating with data: {data}")
+        with open(self.json_file, 'w') as json_file:
+            json.dump(result_dict, json_file)
+
+    def update(self, **kwargs):
+        """
+        Write the Metrics to output file.
+        """
+        self.read_modify_write_file(kwargs)
+
+
+class Throughput:
+    def __init__(self, batch_size, world_size, grad_accum_usteps, moving_avg_window_size):
+        self.seqs_per_iteration = batch_size * world_size * grad_accum_usteps
+        self.moving_avg_window_size = moving_avg_window_size
+        self.moving_avg_window = queue.Queue()
+        self.window_time = 0
+        self.start_time = time.time()
+        self.throughput_peak = 0
+        self.throughput_sum = 0
+
+    def get_throughput(self):
+        step_time = time.time() - self.start_time
+        self.start_time += step_time
+        self.window_time += step_time
+        self.moving_avg_window.put(step_time)
+        window_size = self.moving_avg_window.qsize()
+        if window_size > self.moving_avg_window_size:
+            self.window_time -= self.moving_avg_window.get()
+            window_size -= 1
+        throughput = window_size * self.seqs_per_iteration / self.window_time
+        return throughput
+
+
 def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
-                 grad_norm, params_norm, num_zeros_in_grad):
-    """Log training information such as losses, timing, ...."""
+                 grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss):
     args = get_args()
     timers = get_timers()
     writer = get_tensorboard_writer()
+    assert args.tensorboard_log_interval == args.log_interval, "We want both intervals to overlap to synchronize fetching Loss tensors from device!!"
 
     # Advanced, skipped, and Nan iterations.
     advanced_iters_key = 'advanced iterations'
-    skipped_iters_key = 'skipped iterations'
-    nan_iters_key = 'nan iterations'
+
+    assert skipped_iter == 0
     # Advanced iterations.
-    if not skipped_iter:
-        total_loss_dict[advanced_iters_key] = total_loss_dict.get(
-            advanced_iters_key, 0) + 1
-    else:
-        if advanced_iters_key not in total_loss_dict:
-            total_loss_dict[advanced_iters_key] = 0
-    # Skipped iterations.
-    total_loss_dict[skipped_iters_key] = total_loss_dict.get(
-        skipped_iters_key, 0) + skipped_iter
-    # Update losses and set nan iterations
-    got_nan = False
-    for key in loss_dict:
-        if not skipped_iter:
-            total_loss_dict[key] = total_loss_dict.get(
-                key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
-        else:
-            value = loss_dict[key].float().sum().item()
-            is_nan = value == float('inf') or \
-                     value == -float('inf') or \
-                     value != value
-            got_nan = got_nan or is_nan
-    total_loss_dict[nan_iters_key] = total_loss_dict.get(
-        nan_iters_key, 0) + int(got_nan)
+    total_loss_dict[advanced_iters_key] = total_loss_dict.get(
+        advanced_iters_key, 0) + 1
+    
+    # Return immediately and avoid device synchronization
+    if iteration % args.tensorboard_log_interval != 0:
+        return
 
-    # Logging.
-    timers_to_log = []
-
-    def add_to_logging(name):
-        if name in timers.timers:
-            timers_to_log.append(name)
-    add_to_logging('forward-compute')
-    add_to_logging('forward-recv')
-    add_to_logging('forward-send')
-    add_to_logging('forward-backward-send-forward-backward-recv')
-    add_to_logging('backward-compute')
-    add_to_logging('backward-recv')
-    add_to_logging('backward-send')
-    add_to_logging('backward-send-forward-recv')
-    add_to_logging('backward-send-backward-recv')
-    add_to_logging('backward-params-all-reduce')
-    add_to_logging('backward-embedding-all-reduce')
-    add_to_logging('optimizer-copy-to-main-grad')
-    add_to_logging('optimizer-unscale-and-check-inf')
-    add_to_logging('optimizer-clip-main-grad')
-    add_to_logging('optimizer-copy-main-to-model-params')
-    add_to_logging('optimizer')
-    add_to_logging('batch-generator')
+    """Log training information such as losses, timing, ...."""
+    # Add this to copy loss tensors to cpu:
+    loss_dict = {key: value.cpu().item() for key, value in loss_dict.items()}
+    grad_norm = grad_norm.item() if grad_norm is not None else grad_norm
+    #params_norm = params_norm.item() if params_norm is not None else params_norm
+    num_zeros_in_grad = num_zeros_in_grad.item() if num_zeros_in_grad is not None else num_zeros_in_grad
+    loss_scale = loss_scale.item() if loss_scale is not None else loss_scale
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * args.data_parallel_size * \
         get_num_microbatches()
 
-    total_iterations = total_loss_dict[advanced_iters_key] + \
-                       total_loss_dict[skipped_iters_key]
+    total_iterations = total_loss_dict[advanced_iters_key]
 
+    throughput = thr.get_throughput()   
+    throughput_peak = thr.throughput_peak
+    thr.throughput_sum += throughput
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0 ) and \
        is_last_rank():
@@ -556,26 +627,10 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             writer.add_scalar('params-norm', params_norm, iteration)
             writer.add_scalar('params-norm vs samples', params_norm,
                               args.consumed_train_samples)
-        if args.log_timers_to_tensorboard:
-            timers.write(timers_to_log, writer, iteration,
-                         normalizer=total_iterations)
-        if args.log_memory_to_tensorboard:
-            mem_stats = torch.cuda.memory_stats()
-            writer.add_scalar(
-                "mem-reserved-bytes",
-                mem_stats["reserved_bytes.all.current"],
-                iteration,
-            )
-            writer.add_scalar(
-                "mem-allocated-bytes",
-                mem_stats["allocated_bytes.all.current"],
-                iteration,
-            )
-            writer.add_scalar(
-                "mem-allocated-count",
-                mem_stats["allocation.all.current"],
-                iteration,
-            )
+        if throughput is not None:
+            writer.add_scalar('throughput', throughput, iteration)
+            writer.add_scalar('throughput vs samples', throughput, 
+                              args.consumed_train_samples)
 
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed()
@@ -586,40 +641,70 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                                   elapsed_time_per_iteration, iteration)
         log_string = ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
+        stats['iteration'].append(iteration)
         log_string += ' consumed samples: {:12d} |'.format(
             args.consumed_train_samples)
+        stats['consumed_samples'].append(args.consumed_train_samples)
         log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
             elapsed_time_per_iteration * 1000.0)
+        stats['time'].append(elapsed_time_per_iteration * 1000.0)
         log_string += ' learning rate: {:.3E} |'.format(learning_rate)
+        stats['learning_rate'].append(learning_rate)
         log_string += ' global batch size: {:5d} |'.format(batch_size)
+        stats['global_batch_size'].append(batch_size)
         for key in total_loss_dict:
-            if key not in [advanced_iters_key, skipped_iters_key,
-                           nan_iters_key]:
-                avg = total_loss_dict[key].item() / \
+            if key not in [advanced_iters_key]:
+                avg = total_loss_dict[key].cpu().item() / \
                       float(max(1, total_loss_dict[advanced_iters_key]))
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
-                total_loss_dict[key] = torch.cuda.FloatTensor([0.0])
-        log_string += ' loss scale: {:.1f} |'.format(loss_scale)
+                    stats['lm_loss'].append(avg)
+                #compare with golden for testing
+                if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+                    step_0start = iteration - 1
+                    if step_0start < len(golden_loss) and step_0start >= 0:
+                        np.testing.assert_allclose(avg, float(golden_loss[step_0start]), rtol=2e-1)
         if grad_norm is not None:
             log_string += ' grad norm: {:.3f} |'.format(grad_norm)
+            stats['grad_norm'].append(grad_norm)
         if num_zeros_in_grad is not None:
             log_string += ' num zeros: {:.1f} |'.format(num_zeros_in_grad)
+            stats['num_zeros'].append(num_zeros_in_grad)
         if params_norm is not None:
             log_string += ' params norm: {:.3f} |'.format(params_norm)
-        log_string += ' number of skipped iterations: {:3d} |'.format(
-            total_loss_dict[skipped_iters_key])
-        log_string += ' number of nan iterations: {:3d} |'.format(
-            total_loss_dict[nan_iters_key])
+            stats['params_norm'].append(params_norm)
+        log_string += ' throughput: {:.3f} |'.format(throughput)
+        if throughput > throughput_peak:
+            thr.throughput_peak = throughput
         total_loss_dict[advanced_iters_key] = 0
-        total_loss_dict[skipped_iters_key] = 0
-        total_loss_dict[nan_iters_key] = 0
         print_rank_last(log_string)
         if report_memory_flag and learning_rate > 0.:
             # Report memory after optimizer state has been initialized.
             report_memory('(after {} iterations)'.format(iteration))
             report_memory_flag = False
-        timers.log(timers_to_log, normalizer=args.log_interval)
+        if is_last_rank():
+            data_parallel_degree = mpu.get_data_parallel_world_size()
+            num_workers = data_parallel_degree * args.tensor_model_parallel_size * args.pipeline_model_parallel_size
+            last_loss = 0.0
+            if len(stats['lm_loss']) > 0:
+                last_loss = stats['lm_loss'][-1]
+            microsteps = iteration * args.global_batch_size // args.micro_batch_size
+            # TODO: for some reason, args.global_batch_size is emitted as 1 even
+            # though it is set to 64; is it related to batch size rampup?.
+            metrics = {"num_workers": num_workers,
+                       "data_parallel_degree": mpu.get_data_parallel_world_size(),
+                       "tensor_parallel_degree": args.tensor_model_parallel_size,
+                       "pipeline_parallel_degree": args.pipeline_model_parallel_size,
+                       "steps": iteration,
+                       "microsteps": microsteps,
+                       "loss": last_loss,
+                       "throughput_average": thr.throughput_sum / iteration,
+                       "throughput_peak": thr.throughput_peak,
+                       "global_batch_size": args.global_batch_size,
+                       "batch_size": args.micro_batch_size,
+                       "max_length": args.seq_length}
+            tm = TrainingMetrics("/tmp/test_dict.json")
+            tm.update(**metrics)
 
     return report_memory_flag
 
@@ -657,8 +742,19 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
 
     timers('interval-time').start()
     print_datetime('before the start of training step')
-    report_memory_flag = True
-    while iteration < args.train_iters:
+    report_memory_flag = False # Avoid unnecessary resource prints. To add trn1 resources query once available..
+    #throughput = Throughput(args.micro_batch_size, get_num_microbatches(), args.global_batch_size, args.tensorboard_log_interval)
+    throughput = Throughput(args.micro_batch_size, mpu.get_data_parallel_world_size(), get_num_microbatches(), args.tensorboard_log_interval)
+    golden_loss_file = "./golden_loss.txt"
+    golden_loss = []
+    if path.exists(golden_loss_file):
+        with open(golden_loss_file, "r") as golden:
+            golden_loss = golden.readlines()
+        print("Loaded {} loss values from {}".format(str(len(golden_loss)), golden_loss_file))
+
+    iteration_d = torch.IntTensor([0]).to(xm.xla_device())
+
+    while iteration <= args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
@@ -672,61 +768,73 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
                                        get_num_microbatches()
 
         # Logging.
-        loss_scale = optimizer.get_loss_scale().item()
+        loss_scale = optimizer.get_loss_scale()
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
-        report_memory_flag = training_log(loss_dict, total_loss_dict,
-                                          optimizer.param_groups[0]['lr'],
-                                          iteration, loss_scale,
-                                          report_memory_flag, skipped_iter,
-                                          grad_norm, params_norm, num_zeros_in_grad)
+            
+        for key in loss_dict:
+            total_loss_dict[key] = total_loss_dict.get(
+                key, torch.FloatTensor([0.0]).to(xm.xla_device()))
+            total_loss_dict[key] = torch.where(iteration_d % args.log_interval == 0, loss_dict[key].detach(), loss_dict[key].detach() + total_loss_dict[key].detach())
+        iteration_d = iteration_d.detach() + 1
 
+        xm.add_step_closure(training_log, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
+                                          iteration, loss_scale, report_memory_flag, skipped_iter,
+                                          grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss))
+
+        #XLA uses add_step_closure instead 
+        #report_memory_flag = training_log(loss_dict, total_loss_dict,
+        #                                  optimizer.param_groups[0]['lr'],
+        #                                  iteration, loss_scale,
+        #                                  report_memory_flag, skipped_iter,
+        #                                  grad_norm, params_norm, num_zeros_in_grad)
         # Autoresume
-        if args.adlr_autoresume and \
-           (iteration % args.adlr_autoresume_interval == 0):
-            check_adlr_autoresume_termination(iteration, model, optimizer,
-                                              lr_scheduler)
+        #if args.adlr_autoresume and \
+        #   (iteration % args.adlr_autoresume_interval == 0):
+        #    check_adlr_autoresume_termination(iteration, model, optimizer,
+        #                                      lr_scheduler)
 
         # Evaluation
-        if args.eval_interval and iteration % args.eval_interval == 0 and \
-           args.do_valid:
-            prefix = 'iteration {}'.format(iteration)
-            evaluate_and_print_results(prefix, forward_step_func,
-                                       valid_data_iterator, model,
-                                       iteration, False)
+        #if args.eval_interval and iteration % args.eval_interval == 0 and \
+        #   args.do_valid:
+        #    prefix = 'iteration {}'.format(iteration)
+        #    evaluate_and_print_results(prefix, forward_step_func,
+        #                               valid_data_iterator, model,
+        #                               iteration, False)
 
         # Checkpointing
         saved_checkpoint = False
         if args.save and args.save_interval and \
-           iteration % args.save_interval == 0:
+           iteration % args.save_interval == 0 and \
+            not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
             save_checkpoint_and_time(iteration, model, optimizer,
                                      lr_scheduler)
             saved_checkpoint = True
 
         # Exiting based on duration
-        if args.exit_duration_in_mins:
-            train_time = (time.time() - _TRAIN_START_TIME) / 60.0
-            done_cuda = torch.cuda.IntTensor(
-                [train_time > args.exit_duration_in_mins])
-            torch.distributed.all_reduce(
-                done_cuda, op=torch.distributed.ReduceOp.MAX)
-            done = done_cuda.item()
-            if done:
-                if not saved_checkpoint:
-                    save_checkpoint_and_time(iteration, model, optimizer,
-                                             lr_scheduler)
-                print_datetime('exiting program after {} minutes'.format(train_time))
-                sys.exit()
+        #if args.exit_duration_in_mins:
+        #    train_time = (time.time() - _TRAIN_START_TIME) / 60.0
+        #    done_cuda = torch.cuda.IntTensor(
+        #        [train_time > args.exit_duration_in_mins])
+        #    torch.distributed.all_reduce(
+        #        done_cuda, op=torch.distributed.ReduceOp.MAX)
+        #    done = done_cuda.item()
+        #    if done:
+        #        if not saved_checkpoint:
+        #            save_checkpoint_and_time(iteration, model, optimizer,
+        #                                     lr_scheduler)
+        #        print_datetime('exiting program after {} minutes'.format(train_time))
+        #        sys.exit()
 
         # Exiting based on iterations
-        if args.exit_interval and iteration % args.exit_interval == 0:
-            if not saved_checkpoint:
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         lr_scheduler)
-            torch.distributed.barrier()
-            print_datetime('exiting program at iteration {}'.format(iteration))
-            sys.exit()
+        #if args.exit_interval and iteration % args.exit_interval == 0:
+        #    if not saved_checkpoint:
+        #        save_checkpoint_and_time(iteration, model, optimizer,
+        #                                 lr_scheduler)
+        #    torch.distributed.barrier()
+        #    print_datetime('exiting program at iteration {}'.format(iteration))
+        #    sys.exit()
 
 
     return iteration
@@ -786,17 +894,18 @@ def evaluate_and_print_results(prefix, forward_step_func,
     writer = get_tensorboard_writer()
 
     total_loss_dict = evaluate(forward_step_func, data_iterator, model, verbose)
+    total_loss_dict = {key: value.item() for key, value in total_loss_dict.items()}
     string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
-        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
-        ppl = math.exp(min(20, total_loss_dict[key].item()))
+        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key])
+        ppl = math.exp(min(20, total_loss_dict[key]))
         string += '{} PPL: {:.6E} | '.format(key, ppl)
         if writer:
             writer.add_scalar('{} validation'.format(key),
-                              total_loss_dict[key].item(),
+                              total_loss_dict[key],
                               iteration)
             writer.add_scalar('{} validation vs samples'.format(key),
-                              total_loss_dict[key].item(),
+                              total_loss_dict[key],
                               args.consumed_train_samples)
             if args.log_validation_ppl_to_tensorboard:
                 writer.add_scalar('{} validation ppl'.format(key), ppl,
@@ -835,8 +944,9 @@ def build_train_valid_test_data_iterators(
                 args.eval_iters * args.global_batch_size
 
     # Data loader only on rank 0 of each model parallel group.
-    if mpu.get_tensor_model_parallel_rank() == 0:
-
+    #if mpu.get_tensor_model_parallel_rank() == 0:
+    if True:
+        
         # Number of train/valid/test samples.
         if args.train_samples:
             train_samples = args.train_samples
@@ -853,10 +963,25 @@ def build_train_valid_test_data_iterators(
         print_rank_0('    validation: {}'.format(train_val_test_num_samples[1]))
         print_rank_0('    test:       {}'.format(train_val_test_num_samples[2]))
 
-        # Build the datasets.
         train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
             train_val_test_num_samples)
 
+        device = xm.xla_device()
+        #global _TRAIN_START_TIME
+        #start_time_tensor = torch.cuda.DoubleTensor([_TRAIN_START_TIME])
+        #dummy_sync = torch.DoubleTensor([1.0]).to(device)
+        ## Build the datasets.
+        #if mpu.get_tensor_model_parallel_rank() == 0:
+        #    train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
+        #        train_val_test_num_samples)
+        #    torch.distributed.all_reduce(dummy_sync, async_op=True) 
+        #    xm.mark_step()
+        #else:
+        #    torch.distributed.all_reduce(dummy_sync, async_op=True) 
+        #    xm.mark_step()
+        #    train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
+        #        train_val_test_num_samples)
+#
         # Build dataloders.
         train_dataloader = build_pretraining_data_loader(
             train_ds, args.consumed_train_samples)
@@ -864,23 +989,31 @@ def build_train_valid_test_data_iterators(
             valid_ds, args.consumed_valid_samples)
         test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
+        train_device_dataloader = pl.MpDeviceLoader(train_dataloader, device)
+        valid_device_dataloader = pl.MpDeviceLoader(valid_dataloader, device)
+        test_device_dataloader = pl.MpDeviceLoader(test_dataloader, device)
+
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and args.train_iters > 0
         do_valid = valid_dataloader is not None and args.eval_iters > 0
         do_test = test_dataloader is not None and args.eval_iters > 0
         # Need to broadcast num_tokens and num_type_tokens.
-        flags = torch.cuda.LongTensor(
-            [int(do_train), int(do_valid), int(do_test)])
+        #flags = torch.cuda.LongTensor(
+        #    [int(do_train), int(do_valid), int(do_test)])
+        args.do_train = do_train
+        args.do_valid = do_valid
+        args.do_test = do_test
     else:
         flags = torch.cuda.LongTensor([0, 0, 0])
 
     # Broadcast num tokens.
-    torch.distributed.broadcast(flags,
-                                mpu.get_tensor_model_parallel_src_rank(),
-                                group=mpu.get_tensor_model_parallel_group())
-    args.do_train = flags[0].item()
-    args.do_valid = flags[1].item()
-    args.do_test = flags[2].item()
+    #(TODO)do need  this in future
+    #torch.distributed.broadcast(flags,
+    #                            mpu.get_tensor_model_parallel_src_rank(),
+    #                            group=mpu.get_tensor_model_parallel_group())
+    #args.do_train = flags[0].item()
+    #args.do_valid = flags[1].item()
+    #args.do_test = flags[2].item()
 
 
     # Build iterators.
@@ -888,21 +1021,32 @@ def build_train_valid_test_data_iterators(
     assert dl_type in ['single', 'cyclic']
 
     if train_dataloader is not None:
-        train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(train_dataloader))
+        #train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
+        #                      else iter(cyclic_iter(train_dataloader))
+        train_device_data_iterator = iter(train_device_dataloader) if dl_type == 'single' \
+                              else iter(cyclic_iter(train_device_dataloader))
     else:
-        train_data_iterator = None
+        #train_data_iterator = None
+        train_device_data_iterator = None
 
     if valid_dataloader is not None:
-        valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(valid_dataloader))
+        #valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
+        #                      else iter(cyclic_iter(valid_dataloader))
+        valid_device_data_iterator = iter(valid_device_dataloader) if dl_type == 'single' \
+                              else iter(cyclic_iter(valid_device_dataloader))
     else:
-        valid_data_iterator = None
+        #valid_data_iterator = None
+        valid_device_data_iterator = None
 
     if test_dataloader is not None:
-        test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
-                             else iter(cyclic_iter(test_dataloader))
+        #test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
+        #                     else iter(cyclic_iter(test_dataloader))
+        test_device_data_iterator = iter(test_device_dataloader) if dl_type == 'single' \
+                             else iter(cyclic_iter(test_device_dataloader))
     else:
-        test_data_iterator = None
+        #test_data_iterator = None
+        test_device_data_iterator = None
 
-    return train_data_iterator, valid_data_iterator, test_data_iterator
+    #return train_data_iterator, valid_data_iterator, test_data_iterator
+    return train_device_data_iterator, valid_device_data_iterator, test_device_data_iterator
+
