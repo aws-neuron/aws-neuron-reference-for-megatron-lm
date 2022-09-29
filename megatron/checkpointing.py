@@ -247,7 +247,11 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     if master_only:
         print_rank_2D('checkpoint_name:{}'.format(checkpoint_name))
         ensure_directory_exists(checkpoint_name)
-    xser.save(state_dict, checkpoint_name, master_only=(not master_only), global_master=True)
+    
+    if args.save_xser:
+        xser.save(state_dict, checkpoint_name, (not master_only), global_master=True)
+    else:
+        save(state_dict, checkpoint_name)
     # we don;t need this barrier as save above has it
     # Wait so everyone is done (necessary)
     #if torch.distributed.is_initialized():
@@ -366,7 +370,10 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
 
     # Load the checkpoint.
     try:
-        state_dict = xser.load(checkpoint_name)
+        if args.load_xser:
+            state_dict = xser.load(checkpoint_name)
+        else:    
+            state_dict = torch.load(checkpoint_name, map_location='cpu')
     except ModuleNotFoundError:
         from megatron.fp16_deprecated import loss_scaler
         # For backward compatibility.
@@ -375,7 +382,10 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
             'megatron.fp16_deprecated.loss_scaler']
         sys.modules['megatron.fp16.loss_scaler'] = sys.modules[
             'megatron.fp16_deprecated.loss_scaler']
-        state_dict = xser.load(checkpoint_name)
+        if args.load_xser:
+            state_dict = xser.load(checkpoint_name)
+        else:
+            state_dict = torch.load(checkpoint_name, map_location='cpu')
         sys.modules.pop('fp16.loss_scaler', None)
         sys.modules.pop('megatron.fp16.loss_scaler', None)
     except BaseException as e:
