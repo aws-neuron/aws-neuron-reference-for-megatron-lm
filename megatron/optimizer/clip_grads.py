@@ -74,7 +74,7 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
     # Norm parameters.
     max_norm = float(max_norm)
     norm_type = float(norm_type)
-    total_norm = 0.0
+    total_norm = torch.cuda.FloatTensor([float(0.0)])
 
     # Calculate norm.
     if norm_type == inf:

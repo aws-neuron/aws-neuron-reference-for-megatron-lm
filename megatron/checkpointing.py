@@ -22,6 +22,7 @@ import sys
 import numpy as np
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.utils.serialization as xser
 
 from megatron import (get_args,
                       mpu,
