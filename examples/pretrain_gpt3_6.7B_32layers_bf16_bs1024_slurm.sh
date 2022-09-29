@@ -25,7 +25,7 @@ export XLA_USE_BF16=1
 export NEURON_CC_FLAGS="--model-type transformer"
  
  
-TRAIN_ITERS=10000
+TRAIN_ITERS=143051
 if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
     TRAIN_ITERS=65
 fi
@@ -67,6 +67,10 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --init-method-std 0.006 \
     --adam-beta1 0.9 \
     --adam-beta2 0.95 \
+    --save 32_layer_$WORLD_SIZE_JOB \
+    --save-interval 1500 \
+    --use-cpu-initialization \
+    --load 32_layer_$WORLD_SIZE_JOB \
     --tensorboard-dir ./tb_gpt3_32layer_bf16 \
     |& tee run_log_gpt3_32layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log
  
