@@ -385,7 +385,7 @@ def setup_model_and_optimizer(model_provider_func, model_type):
 
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
-    if args.load is not None and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+    if (args.load or args.load_xser) and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
         timers = get_timers()
         timers('load-checkpoint').start()
         #Staggering load checkpoints
@@ -575,7 +575,7 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
 
     # Checkpointing
     saved_checkpoint = False
-    if args.save and args.save_interval and \
+    if (args.save or args.save_xser) and args.save_interval and \
         iteration % args.save_interval == 0 and \
         not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
         save_checkpoint_and_time(iteration, model, optimizer,
