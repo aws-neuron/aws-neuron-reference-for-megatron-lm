@@ -385,7 +385,7 @@ def setup_model_and_optimizer(model_provider_func, model_type):
 
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
-    if args.load is not None and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+    if (args.load or args.load_xser) and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
         timers = get_timers()
         timers('load-checkpoint').start()
         #Staggering load checkpoints
@@ -559,9 +559,10 @@ class Throughput:
         return throughput
 
 
-def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
+def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
-                 grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss):
+                 grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss,
+                 model, optimizer, lr_scheduler):
     args = get_args()
     timers = get_timers()
     writer = get_tensorboard_writer()
@@ -571,6 +572,16 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     advanced_iters_key = 'advanced iterations'
 
     assert skipped_iter == 0
+
+    # Checkpointing
+    saved_checkpoint = False
+    if (args.save or args.save_xser) and args.save_interval and \
+        iteration % args.save_interval == 0 and \
+        not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+        save_checkpoint_and_time(iteration, model, optimizer,
+                                    lr_scheduler)
+        saved_checkpoint = True
+
     # Advanced iterations.
     total_loss_dict[advanced_iters_key] = total_loss_dict.get(
         advanced_iters_key, 0) + 1
@@ -779,12 +790,13 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             total_loss_dict[key] = torch.where(iteration_d % args.log_interval == 0, loss_dict[key].detach(), loss_dict[key].detach() + total_loss_dict[key].detach())
         iteration_d = iteration_d.detach() + 1
 
-        xm.add_step_closure(training_log, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
+        xm.add_step_closure(training_markstep_closure, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale, report_memory_flag, skipped_iter,
-                                          grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss))
+                                          grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss,
+                                          model, optimizer, lr_scheduler))
 
         #XLA uses add_step_closure instead 
-        #report_memory_flag = training_log(loss_dict, total_loss_dict,
+        #report_memory_flag = training_markstep_closure(loss_dict, total_loss_dict,
         #                                  optimizer.param_groups[0]['lr'],
         #                                  iteration, loss_scale,
         #                                  report_memory_flag, skipped_iter,
@@ -802,15 +814,6 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         #    evaluate_and_print_results(prefix, forward_step_func,
         #                               valid_data_iterator, model,
         #                               iteration, False)
-
-        # Checkpointing
-        saved_checkpoint = False
-        if args.save and args.save_interval and \
-           iteration % args.save_interval == 0 and \
-            not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     lr_scheduler)
-            saved_checkpoint = True
 
         # Exiting based on duration
         #if args.exit_duration_in_mins:
