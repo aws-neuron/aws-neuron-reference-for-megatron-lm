@@ -16,6 +16,8 @@ RANK_NODE=$SLURM_NODEID
 DISTRIBUTED_ARGS="--nproc_per_node $NUM_NEURONCORES --nnodes $WORLD_SIZE_JOB --node_rank $RANK_NODE --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 echo $DISTRIBUTED_ARGS
  
+CHECKPOINT_PATH=32_layer_chkpt_$WORLD_SIZE_JOB
+
 export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
 export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
  
@@ -23,6 +25,7 @@ export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
  
 export XLA_USE_BF16=1
 export NEURON_CC_FLAGS="--model-type transformer"
+export NEURON_RT_EXEC_TIMEOUT=600
  
  
 TRAIN_ITERS=143051
@@ -67,10 +70,10 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --init-method-std 0.006 \
     --adam-beta1 0.9 \
     --adam-beta2 0.95 \
-    --save-xser 32_layer_$WORLD_SIZE_JOB \
+    --save-xser $CHECKPOINT_PATH \
     --save-interval 1500 \
     --use-cpu-initialization \
-    --load-xser 32_layer_$WORLD_SIZE_JOB \
+    --load-xser $CHECKPOINT_PATH \
     --tensorboard-dir ./tb_gpt3_32layer_bf16 \
     |& tee run_log_gpt3_32layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log
  
