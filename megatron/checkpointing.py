@@ -242,7 +242,8 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
         state_dict['rng_tracker_states'] \
             = mpu.get_cuda_rng_tracker().get_states()
 
-    checkpoint_name = get_checkpoint_name(args.save, iteration)
+    chkpt_path = args.save if args.save is not None else args.save_xser
+    checkpoint_name = get_checkpoint_name(chkpt_path, iteration)
     master_only = mpu.get_data_parallel_rank() == 0
     if master_only:
         print_rank_2D('checkpoint_name:{}'.format(checkpoint_name))
@@ -259,7 +260,7 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
 
     # And update the latest iteration
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        tracker_filename = get_checkpoint_tracker_filename(args.save)
+        tracker_filename = get_checkpoint_tracker_filename(chkpt_path)
         with open(tracker_filename, 'w') as f:
             f.write(str(iteration))
 
@@ -348,7 +349,6 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
     load_dir = getattr(args, load_arg)
 
     model = utils.unwrap_model(model)
-
     # Read the tracker file and set the iteration.
     tracker_filename = get_checkpoint_tracker_filename(load_dir)
 
@@ -366,7 +366,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
 
     # Checkpoint.
     checkpoint_name = get_checkpoint_name(load_dir, iteration, release)
-    print_rank_0(f' loading checkpoint from {args.load} at iteration {iteration}')
+    print_rank_0(f' loading checkpoint from {load_dir} at iteration {iteration}')
 
     # Load the checkpoint.
     try:
