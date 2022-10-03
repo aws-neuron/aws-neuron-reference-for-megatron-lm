@@ -16,7 +16,7 @@ RANK_NODE=$SLURM_NODEID
 DISTRIBUTED_ARGS="--nproc_per_node $NUM_NEURONCORES --nnodes $WORLD_SIZE_JOB --node_rank $RANK_NODE --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 echo $DISTRIBUTED_ARGS
  
-CHECKPOINT_PATH=32_layer_chkpt_$WORLD_SIZE_JOB
+CHECKPOINT_PATH=24_layer_chkpt_$WORLD_SIZE_JOB
 
 export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
 export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
@@ -35,7 +35,7 @@ fi
  
 torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --tensor-model-parallel-size 8 \
-    --num-layers 32 \
+    --num-layers 24 \
     --hidden-size 4096 \
     --num-attention-heads 32 \
     --micro-batch-size 1 \
@@ -74,8 +74,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --save-interval 1500 \
     --use-cpu-initialization \
     --load-xser $CHECKPOINT_PATH \
-    --tensorboard-dir ./tb_gpt3_32layer_bf16 \
-    |& tee run_log_gpt3_32layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log
+    --tensorboard-dir ./tb_gpt3_24layer_bf16 \
+    |& tee run_log_gpt3_24layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log
  
 
 dump_to_s3_update_json_scr=../../dump_to_s3_update_test_json.sh

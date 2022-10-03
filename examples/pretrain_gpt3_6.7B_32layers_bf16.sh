@@ -2,6 +2,7 @@
 set -o pipefail
 
 DATA_PATH=~/examples_datasets/gpt2/my-gpt2_text_document
+CHECKPOINT_PATH=32_layer_chkpt
 
 NUM_NEURONCORES=32
 DISTRIBUTED_ARGS="--nproc_per_node $NUM_NEURONCORES"
@@ -33,7 +34,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --vocab-file ~/examples_datasets/gpt2/gpt2-vocab.json \
     --merge-file ~/examples_datasets/gpt2/gpt2-merges.txt \
     --data-impl mmap \
-    --split 90,10,0 \
+    --split 100,0,0 \
     --distributed-backend xla \
     --lr 0.00015 \
     --lr-decay-style cosine \
@@ -52,6 +53,10 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --no-bias-dropout-fusion \
     --no-async-tensor-model-parallel-allreduce \
     --no-contiguous-buffers-in-local-ddp \
+    --save-xser $CHECKPOINT_PATH \
+    --save-interval 1500 \
+    --load-xser $CHECKPOINT_PATH \
+    --use-cpu-initialization \
     --tensorboard-dir ./tb_gpt3_32layer_bf16 \
     |& tee run_log_gpt3_32layer_bf16
 
