@@ -386,14 +386,15 @@ def setup_model_and_optimizer(model_provider_func, model_type):
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
     if (args.load or args.load_xser) and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+        load_arg='load' if args.load else 'load_xser'
         timers = get_timers()
         timers('load-checkpoint').start()
         #Staggering load checkpoints
         for i in range(0, mpu.get_tensor_model_parallel_world_size()):
             if mpu.get_tensor_model_parallel_rank() == i:
-                args.iteration = load_checkpoint(model, optimizer, lr_scheduler)
+                args.iteration = load_checkpoint(model, optimizer, lr_scheduler, load_arg=load_arg)
+                print_rank_2D(f'Finished Loading Phase-{i}')
             xm.rendezvous(f'load-chkpt-phase-{i}')
-            print_rank_2D(f'Finished Loading Phase-{i}')
         timers('load-checkpoint').stop()
         timers.log(['load-checkpoint'])
     else:
