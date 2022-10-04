@@ -54,8 +54,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --no-async-tensor-model-parallel-allreduce \
     --no-contiguous-buffers-in-local-ddp \
     --save-xser $CHECKPOINT_PATH \
-    --save-interval 1500 \
-    --load-xser $CHECKPOINT_PATH \
+    --save-interval 2000 \
     --use-cpu-initialization \
     --tensorboard-dir ./tb_gpt3_32layer_bf16 \
     |& tee run_log_gpt3_32layer_bf16

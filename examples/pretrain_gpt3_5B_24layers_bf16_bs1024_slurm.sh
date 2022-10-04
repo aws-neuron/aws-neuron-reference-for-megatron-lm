@@ -71,9 +71,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --adam-beta1 0.9 \
     --adam-beta2 0.95 \
     --save-xser $CHECKPOINT_PATH \
-    --save-interval 1500 \
+    --save-interval 2000 \
     --use-cpu-initialization \
-    --load-xser $CHECKPOINT_PATH \
     --tensorboard-dir ./tb_gpt3_24layer_bf16 \
     |& tee run_log_gpt3_24layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log
  
