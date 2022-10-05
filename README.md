@@ -1,17 +1,1 @@
-## My Project
-
-TODO: Fill this README out!
-
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
-
-## Security
-
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
-
-## License
-
-This library is licensed under the Amazon Software License.
-
+This Megatron-LM library (source https://github.com/NVIDIA/Megatron-LM) is adapted for use with AWS Trainium via Neuron SDK. Please see Neuron SDK documentation for tutorial on using Megatron-LM on AWS Trainium.
