@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.utils.serialization as xser
-
 from megatron import (get_args,
                       mpu,
                       print_rank_0,
@@ -34,6 +33,19 @@ from megatron import (get_args,
 _CHECKPOINT_VERSION = None
 _ARGS_TO_SAVE =  { 'num_layers', 'hidden_size', 'num_attention_heads', 'tensor_model_parallel_size', \
                     'consumed_train_samples', 'consumed_valid_samples', 'pipeline_model_parallel_size' }
+
+
+class Checkpoint:
+    def __init__(self, checkpoint_list=[]):
+        self.checkpoint_list = checkpoint_list
+
+    def keep_recent_checkpoint(self):
+        for ckpt in self.checkpoint_list[:-1]:
+            shutil.rmtree(ckpt)
+            self.checkpoint_list.remove(ckpt)
+
+    def num_checkpoints(self):
+        return len(self.checkpoint_list)
 
 
 def set_checkpoint_version(value):

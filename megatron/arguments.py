@@ -563,7 +563,9 @@ def _add_checkpointing_args(parser):
                        help='Load model for finetuning. Do not load optimizer '
                        'or rng state from checkpoint and set iteration to 0. '
                        'Assumed when loading a release checkpoint.')
-
+    group.add_argument('--keep-last-checkpoint-only', action='store_true',
+                       help='Keep only the most recent checkpoint')
+   
     return parser
 
 

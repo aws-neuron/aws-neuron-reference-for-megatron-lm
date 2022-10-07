@@ -27,7 +27,7 @@ import torch_xla.core.xla_model as xm
 
 import os
 
-_ALLREDUCE_BUCKET_CAP_MB = 100
+_ALLREDUCE_BUCKET_CAP_MB = 512
 
 def bucket_allreduce(tensor_list):
     bucket_cap = int(os.getenv('BUCKET_CAP_KB', _ALLREDUCE_BUCKET_CAP_MB))*1024*1024

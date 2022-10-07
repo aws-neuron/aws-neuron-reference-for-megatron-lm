@@ -22,6 +22,7 @@ import json
 import math
 import sys
 import time
+import shutil
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
 
@@ -41,6 +42,8 @@ from megatron import print_rank_last
 from megatron import print_rank_2D
 from megatron.checkpointing import load_checkpoint
 from megatron.checkpointing import save_checkpoint
+from megatron.checkpointing import get_checkpoint_name
+from megatron.checkpointing import Checkpoint
 from megatron.model import Float16Module
 from megatron.model import ModelType
 from megatron.optimizer import get_megatron_optimizer
@@ -563,7 +566,7 @@ class Throughput:
 def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
                  grad_norm, params_norm, num_zeros_in_grad, thr, golden_loss,
-                 model, optimizer, lr_scheduler):
+                 model, optimizer, lr_scheduler, ckpts):
     args = get_args()
     timers = get_timers()
     writer = get_tensorboard_writer()
@@ -582,6 +585,13 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
         save_checkpoint_and_time(iteration, model, optimizer,
                                     lr_scheduler)
         saved_checkpoint = True
+
+	ckpt_parent_path = args.save if args.save else args.save-xser	
+	ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))	
+
+    master_only = mpu.get_data_parallel_rank() == 0
+    if ckpts.num_checkpoints() > 1 and args.keep_last_checkpoint_only and master_only:
+	ckpts.keep_recent_checkpoint()
 
     # Advanced iterations.
     total_loss_dict[advanced_iters_key] = total_loss_dict.get(
@@ -757,6 +767,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
     report_memory_flag = False # Avoid unnecessary resource prints. To add trn1 resources query once available..
     #throughput = Throughput(args.micro_batch_size, get_num_microbatches(), args.global_batch_size, args.tensorboard_log_interval)
     throughput = Throughput(args.micro_batch_size, mpu.get_data_parallel_world_size(), get_num_microbatches(), args.tensorboard_log_interval)
+    ckpts = Checkpoint()
     golden_loss_file = "./golden_loss.txt"
     golden_loss = []
     if path.exists(golden_loss_file):
@@ -794,7 +805,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         xm.add_step_closure(training_markstep_closure, (loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale, report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss,
-                                          model, optimizer, lr_scheduler))
+                                          model, optimizer, lr_scheduler, ckpts))
 
         #XLA uses add_step_closure instead 
         #report_memory_flag = training_markstep_closure(loss_dict, total_loss_dict,
