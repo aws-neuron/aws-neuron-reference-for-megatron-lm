@@ -57,12 +57,21 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --save-interval 2000 \
     --use-cpu-initialization \
     --tensorboard-dir ./tb_gpt3_24layer_bf16 \
-    |& tee run_log_gpt3_24layer_bf16
+    |& tee run_log_gpt3_24layer_bf16 &
+wait %1
 
+$ret_val=$?
 if [ $ret_val -eq 0 ]; then
     success=1
 else
     success=0
+fi
+
+dump_to_s3_update_json_scr=../../dump_to_s3_update_test_json.sh
+if [ -e $dump_to_s3_update_json_scr ]; then
+    $dump_to_s3_update_json_scr $@ --key=inference_success --value=$success || echo "Unable to update test result JSON."
+else
+    echo "WARNING: Script $dump_to_s3_update_json_scr not found. Not updating test result JSON."
 fi
 
 exit $ret_val
