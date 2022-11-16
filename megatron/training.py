@@ -586,12 +586,12 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
                                     lr_scheduler)
         saved_checkpoint = True
 
-	ckpt_parent_path = args.save if args.save else args.save-xser	
-	ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))	
+        ckpt_parent_path = args.save if args.save else args.save_xser	
+        ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))	
 
     master_only = mpu.get_data_parallel_rank() == 0
     if ckpts.num_checkpoints() > 1 and args.keep_last_checkpoint_only and master_only:
-	ckpts.keep_recent_checkpoint()
+        ckpts.keep_recent_checkpoint()
 
     # Advanced iterations.
     total_loss_dict[advanced_iters_key] = total_loss_dict.get(
