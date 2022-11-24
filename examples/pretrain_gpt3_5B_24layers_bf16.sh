@@ -47,7 +47,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --eval-interval $TRAIN_ITERS \
     --eval-iters 1000 \
     --attention-dropout 0 \
-    --hidden-dropout 0 \    
+    --hidden-dropout 0 \
     --no-masked-softmax-fusion \
     --no-bias-gelu-fusion \
     --no-bias-dropout-fusion \
