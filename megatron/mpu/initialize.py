@@ -106,6 +106,12 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
     num_pipeline_model_parallel_groups = world_size // pipeline_model_parallel_size
     num_data_parallel_groups = world_size // data_parallel_size
 
+    #For tensor and/or data parallel, use spmd approach, not with pipeline parallel
+    if pipeline_model_parallel_size > 1:
+        pg_options = None
+    else:
+        pg_options = {'xla_pg_options' : {'spmd' : True}}
+
     if virtual_pipeline_model_parallel_size_ is not None:
         global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
         global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
@@ -130,7 +136,7 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
             ranks = range(start_rank + j, end_rank,
                           tensor_model_parallel_size)
             all_data_parallel_group_ranks.append(list(ranks))
-            group = torch.distributed.new_group(ranks)
+            group = torch.distributed.new_group(ranks, pg_options=pg_options)
             if rank in ranks:
                _DATA_PARALLEL_GROUP = group
 
@@ -141,7 +147,7 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
     for i in range(data_parallel_size):
         ranks = [data_parallel_group_ranks[i]
                  for data_parallel_group_ranks in all_data_parallel_group_ranks]
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, pg_options=pg_options)
         if rank in ranks:
            _MODEL_PARALLEL_GROUP = group
 
@@ -152,7 +158,7 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
     for i in range(num_tensor_model_parallel_groups):
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, pg_options=pg_options)
         if rank in ranks:
            _TENSOR_MODEL_PARALLEL_GROUP = group
 

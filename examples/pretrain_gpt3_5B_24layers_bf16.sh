@@ -60,7 +60,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     |& tee run_log_gpt3_24layer_bf16 &
 wait %1
 
-$ret_val=$?
+ret_val=$?
 if [ $ret_val -eq 0 ]; then
     success=1
 else
