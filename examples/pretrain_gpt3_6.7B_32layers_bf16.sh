@@ -1,22 +1,31 @@
 #! /bin/bash
 set -o pipefail
 
+MODEL_CONFIG_NAME=gpt3_6.7B_32layers_bf16
+
 DATA_PATH=~/examples_datasets/gpt2/my-gpt2_text_document
-CHECKPOINT_PATH=32_layer_chkpt
+CHECKPOINT_PATH=chkpt_${MODEL_CONFIG_NAME}
 
 NUM_NEURONCORES=32
 DISTRIBUTED_ARGS="--nproc_per_node $NUM_NEURONCORES"
 
+# Keep only 3 number of graphs loaded in Neuron runtime for each process to reduce device mem usage
 export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
-export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
-
-export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
+# Mark all parameter transfers as static to enable runtime optimizations for wrapped torch.nn modules
+export NEURON_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
+# Enables custom lowering for Softmax operation to enable compiler optimizations and improve GPT performance
+export NEURON_FUSE_SOFTMAX=1
+# Cast training to BF16 and enable stochastic rounding
 export XLA_USE_BF16=1
-export NEURON_CC_FLAGS="--model-type transformer"
+
+# Workaround "Too many open files" error with GPT training on U20 server AMI
+ulimit -n 8192
 
 TRAIN_ITERS=10000
+TB_DIR=./tb_${MODEL_CONFIG_NAME}
 if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
     TRAIN_ITERS=65
+    TB_DIR=/tmp/parallel_compile_ignored_tb_output
 fi
 
 torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
@@ -56,8 +65,8 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --save-xser $CHECKPOINT_PATH \
     --save-interval 2000 \
     --use-cpu-initialization \
-    --tensorboard-dir ./tb_gpt3_32layer_bf16 \
-    |& tee run_log_gpt3_32layer_bf16 &
+    --tensorboard-dir $TB_DIR \
+    |& tee run_log_$MODEL_CONFIG_NAME.txt &
 wait %1
 
 ret_val=$?

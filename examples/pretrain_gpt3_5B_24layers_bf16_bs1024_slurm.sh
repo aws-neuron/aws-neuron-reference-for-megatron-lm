@@ -1,10 +1,13 @@
 #! /bin/bash
 set -o pipefail
+
+MODEL_CONFIG_NAME=gpt3_5B_24layers_bf16
  
-sudo modprobe -r neuron; sudo modprobe neuron
+# Enable Elastic Fabric Adapter for higher networking performance
 export FI_EFA_USE_DEVICE_RDMA=1
 export FI_PROVIDER=efa
- 
+export FI_EFA_FORK_SAFE=1
+
 DATA_PATH=~/examples_datasets/gpt2/my-gpt2_text_document
  
 MASTER_ADDR=(`scontrol show hostnames $SLURM_JOB_NODELIST`)
@@ -16,21 +19,28 @@ RANK_NODE=$SLURM_NODEID
 DISTRIBUTED_ARGS="--nproc_per_node $NUM_NEURONCORES --nnodes $WORLD_SIZE_JOB --node_rank $RANK_NODE --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 echo $DISTRIBUTED_ARGS
  
-CHECKPOINT_PATH=24_layer_chkpt_$WORLD_SIZE_JOB
+CHECKPOINT_PATH=chkpt_${MODEL_CONFIG_NAME}_${WORLD_SIZE_JOB}
 
+# Keep only 3 number of graphs loaded in Neuron runtime for each process to reduce device mem usage
 export NEURON_NUM_RECENT_MODELS_TO_KEEP=3
-export NEURON_INTERNAL_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
- 
-export NEURON_RT_STOCHASTIC_ROUNDING_SEED=0
- 
+# Mark all parameter transfers as static to enable runtime optimizations for wrapped torch.nn modules
+export NEURON_TRANSFER_ALL_PARAMETERS_WITH_STATIC_RING=1
+# Enables custom lowering for Softmax operation to enable compiler optimizations and improve GPT performance
+export NEURON_FUSE_SOFTMAX=1
+# Cast training to BF16 and enable stochastic rounding
 export XLA_USE_BF16=1
-export NEURON_CC_FLAGS="--model-type transformer"
+# Increase Neuron RT execution timeout in case slow compilation causes Neuron RT to wait longer than default timeout
 export NEURON_RT_EXEC_TIMEOUT=600
- 
- 
+
+# Separate NeuronCache dir per node, workaround limitation to file locking on NFS
+export NEURON_CC_FLAGS="--cache_dir=$HOME/neuron_cache/gpt/`hostname`"
+
 TRAIN_ITERS=143051
+TB_DIR=./tb_${MODEL_CONFIG_NAME}
+# Run fewer steps and ignore tb output when extract graphs only (neuron_parallel_compile)
 if [[ "$NEURON_EXTRACT_GRAPHS_ONLY" == "1" ]]; then
     TRAIN_ITERS=65
+    TB_DIR=/tmp/parallel_compile_ignored_tb_output
 fi
  
 torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
@@ -73,17 +83,31 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --save-xser $CHECKPOINT_PATH \
     --save-interval 2000 \
     --use-cpu-initialization \
-    --tensorboard-dir ./tb_gpt3_24layer_bf16 \
-    |& tee run_log_gpt3_24layer_bf16_torchrun.$RANK_NODE.$WORLD_SIZE_JOB.log &
-wait %1 
-
+    --tensorboard-dir $TB_DIR \
+    |& tee run_log_$MODEL_CONFIG_NAME.$RANK_NODE.$WORLD_SIZE_JOB.txt &
+wait %1
+ 
 ret_val=$?
+
+if [ $ret_val -eq 0 ] ; then
+    msg="SUCCESS"
+elif [ $ret_val -eq 2 ] ; then
+    msg="SCANCEL/INTERRUPT"
+else
+    msg="INTERNAL FAILURE"
+    # Uncomment lines below to requeue after internal failure (make sure the script doesn't fail)
+    #msg="INTERNAL FAILURE - HARDWARE ISSUE? Requeue JOB ID ${SLURM_JOB_ID} - use scancel to terminate"
+    #scontrol requeue ${SLURM_JOB_ID}
+fi
+echo $msg
+
 if [ $ret_val -eq 0 ]; then
     success=1
 else
     success=0
 fi
 
+# Below is for testing only, not needed for actual execution
 dump_to_s3_update_json_scr=../../dump_to_s3_update_test_json.sh
 if [ -e $dump_to_s3_update_json_scr ]; then
     $dump_to_s3_update_json_scr $@ --key=inference_success --value=$success || echo "Unable to update test result JSON."

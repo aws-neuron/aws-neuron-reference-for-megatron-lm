@@ -16,13 +16,15 @@
 
 """Pretrain utilities."""
 
-from datetime import datetime
+from collections import namedtuple
+from datetime import datetime, timezone
 import os
 import json
 import math
 import sys
 import time
 import shutil
+from typing import Any, Dict, List
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
 
@@ -56,7 +58,7 @@ from megatron.utils import unwrap_model
 from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.schedules import get_forward_backward_func
-from megatron.utils import report_memory
+from megatron.utils import report_memory, unload_all_models
 import queue
 from os import path
 import numpy as np
@@ -70,6 +72,71 @@ torch.cuda.LongTensor = lambda t: torch.LongTensor(t).to(xm.xla_device())
 torch.cuda.current_device = lambda: xm.xla_device() 
 
 stats = {'iteration': [], 'consumed_samples': [], 'time': [], 'learning_rate': [], 'global_batch_size': [], 'lm_loss': [], 'loss_scale': [], 'grad_norm': [], 'skipped_iterations': [], 'nan_iterations': [],'forward-compute': [], 'backward-compute': [], 'backward-params-all-reduce': [], 'backward-embedding-all-reduce': [], 'optimizer-copy-to-main-grad': [], 'optimizer-unscale-and-check-inf': [], 'optimizer-clip-main-grad': [], 'optimizer-copy-main-to-model-params': [], 'optimizer': [], 'batch-generator': [], 'params_norm':[]}
+Metric = namedtuple("Metric", ["name", "value", "units", "additional_data"])
+
+
+class TrainingMetrics:
+    def __init__(self,json_file):
+        self.json_file = json_file
+
+    def read_modify_write_file(self, data, key: str = "metrics") -> None:
+        """
+        data (dict of training parameters or list of metrics): Data to update in the file.
+        key (str): the dictionary key under which data is to be recorded
+        """
+        result_dict = {}
+        print(f"Writing data to the provided results file: {self.json_file}")
+        if os.path.exists(self.json_file):
+            with open(self.json_file) as json_file:
+                result_dict = json.loads(json_file.read()) or result_dict
+        print(f"Updating with {key} data: {data}")
+        if result_dict:
+            try:
+                # handle internal named entity if present
+                results = result_dict[next(iter(result_dict))]
+            except Exception:
+                results = result_dict
+            current = results.get(key)
+            if not current:
+                results[key] = data
+            else:
+                if isinstance(current, list):
+                    current.extend(data)
+                elif isinstance(current, dict):
+                    current.update(data)
+        else:
+            result_dict["results"] = {key: data}
+        with open(self.json_file, 'w') as json_file:
+            json.dump(result_dict, json_file)
+
+    def store_metrics(self, metrics: List[Metric]) -> None:
+        """
+        Writes collected metrics to the file.
+
+        """
+        data = [
+            {
+                "MetricName": metric.name,
+                "MeasuredValue": metric.value,
+                "Units": metric.units,
+                "Timestamp": datetime.now(timezone.utc).isoformat(),
+                "AdditionalData": metric.additional_data,
+            } for metric in metrics
+        ]
+        self.update(data=data, key="metrics")
+
+    def store_parameters(self, parameters: Dict[str, Any]) -> None:
+        """
+        Writes specified model and configuration parameters to the file.
+
+        """
+        self.update(data=parameters, key="parameters")
+
+    def update(self, **kwargs: Any) -> None:
+        """
+        Write specified data to the output file.
+        """
+        self.read_modify_write_file(**kwargs)
 
 
 def print_datetime(string):
@@ -202,6 +269,8 @@ def pretrain(train_valid_test_dataset_provider,
     #                               0, True)
 
     return stats
+
+
 def update_train_iters(args):
 
     # For iteration-based training, we don't need to do anything
@@ -296,17 +365,29 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Print number of parameters.
     if mpu.get_data_parallel_rank() == 0:
+        parameters = sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model])
         print(' > number of parameters on (tensor, pipeline) '
               'model parallel rank ({}, {}): {}'.format(
             mpu.get_tensor_model_parallel_rank(),
             mpu.get_pipeline_model_parallel_rank(),
-            sum([sum([p.nelement() for p in model_module.parameters()])
-                 for model_module in model])), flush=True)
+            parameters), flush=True)
+        #if torch.distributed.get_rank() == 0:
+        #    if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+        #        tm = TrainingMetrics("/tmp/test_dict.json")
+        #        # TODO: when pipeline parallel support comes in, need to aggregate parameters instead of
+        #        # just multiplying by tensor parallel degree
+        #        tm.store_parameters(
+        #            {"Parameters": f"{round(parameters * args.tensor_model_parallel_size / 1e9, 1)}B"}
+        #        )
 
     # GPU allocation.
     for model_module in model:
         #model_module.cuda(torch.cuda.current_device())
         model_module.to(xm.xla_device())
+
+    # TODO: Add cmdline arg to choose to do all reduce in CPU vs device
+    assert len(model) == 1 #Hack restriction, only expecting one model per rank
+    model[0].may_sync_initial_word_embeddings()
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
@@ -507,39 +588,6 @@ def train_step(forward_step_func, data_iterator,
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
-class TrainingMetrics:
-    def __init__(self,json_file):
-        self.json_file = json_file
-
-    def read_modify_write_file(self, data):
-        """
-        data (dict): Data to update in the file.
-        """
-        result_dict = {}
-        print(f"Updating train metrics in provide {self.json_file} file")
-        if os.path.exists(self.json_file):
-            with open(self.json_file) as json_file:
-                result_dict = json.loads(json_file.read()) or {}
-                print(f"Current data: {result_dict}")
-        if result_dict:
-            try:
-                # handle internal named entity if present
-                result_dict[next(iter(result_dict))].update(data)
-            except Exception:
-                result_dict = data
-        else:
-            result_dict = data
-        print(f"Updating with data: {data}")
-        with open(self.json_file, 'w') as json_file:
-            json.dump(result_dict, json_file)
-
-    def update(self, **kwargs):
-        """
-        Write the Metrics to output file.
-        """
-        self.read_modify_write_file(kwargs)
-
-
 class Throughput:
     def __init__(self, batch_size, world_size, grad_accum_usteps, moving_avg_window_size):
         self.seqs_per_iteration = batch_size * world_size * grad_accum_usteps
@@ -549,6 +597,7 @@ class Throughput:
         self.start_time = time.time()
         self.throughput_peak = 0
         self.throughput_sum = 0
+        self.throughputs = []
 
     def get_throughput(self):
         step_time = time.time() - self.start_time
@@ -560,6 +609,7 @@ class Throughput:
             self.window_time -= self.moving_avg_window.get()
             window_size -= 1
         throughput = window_size * self.seqs_per_iteration / self.window_time
+        self.throughputs.append(throughput)
         return throughput
 
 
@@ -586,9 +636,10 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
                                     lr_scheduler)
         saved_checkpoint = True
 
-        ckpt_parent_path = args.save if args.save else args.save_xser	
-        ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))	
-
+        ckpt_parent_path = args.save if args.save else args.save_xser
+        ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))
+    
+    # Keep only most recent checkpoint if flag set
     master_only = mpu.get_data_parallel_rank() == 0
     if ckpts.num_checkpoints() > 1 and args.keep_last_checkpoint_only and master_only:
         ckpts.keep_recent_checkpoint()
@@ -604,7 +655,7 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
     """Log training information such as losses, timing, ...."""
     # Add this to copy loss tensors to cpu:
     loss_dict = {key: value.cpu().item() for key, value in loss_dict.items()}
-    grad_norm = grad_norm.item() if grad_norm is not None else grad_norm
+    grad_norm = grad_norm.cpu().item() if grad_norm is not None else grad_norm
     #params_norm = params_norm.item() if params_norm is not None else params_norm
     num_zeros_in_grad = num_zeros_in_grad.item() if num_zeros_in_grad is not None else num_zeros_in_grad
     loss_scale = loss_scale.item() if loss_scale is not None else loss_scale
@@ -713,20 +764,48 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
             microsteps = iteration * args.global_batch_size // args.micro_batch_size
             # TODO: for some reason, args.global_batch_size is emitted as 1 even
             # though it is set to 64; is it related to batch size rampup?.
-            metrics = {"num_workers": num_workers,
-                       "data_parallel_degree": mpu.get_data_parallel_world_size(),
-                       "tensor_parallel_degree": args.tensor_model_parallel_size,
-                       "pipeline_parallel_degree": args.pipeline_model_parallel_size,
-                       "steps": iteration,
-                       "microsteps": microsteps,
-                       "loss": last_loss,
-                       "throughput_average": thr.throughput_sum / iteration,
-                       "throughput_peak": thr.throughput_peak,
-                       "global_batch_size": args.global_batch_size,
-                       "batch_size": args.micro_batch_size,
-                       "max_length": args.seq_length}
             tm = TrainingMetrics("/tmp/test_dict.json")
-            tm.update(**metrics)
+            additional_data = {"Iteration": iteration, "Microstep": microsteps}
+            metric_data = [
+                Metric("Loss", round(last_loss, 4), "", additional_data),
+                Metric("Throughput", round(throughput, 4), "seq/s", additional_data),
+            ]
+            tm.store_metrics(metric_data)
+            tm.store_parameters(
+                {
+                    "Workers": num_workers,
+                    "Data parallel degree": mpu.get_data_parallel_world_size(),
+                    "Pipeline parallel degree": args.pipeline_model_parallel_size,
+                    "Tensor parallel degree": args.tensor_model_parallel_size,
+                    "Batch size": args.global_batch_size,
+                    "Micro-batch size": args.micro_batch_size,
+                    "Sequence length": args.seq_length,
+                    "Data type": str(args.params_dtype),
+                    "Learning rate": learning_rate,
+                    "Layers": args.num_layers,
+                    "Hidden size": args.hidden_size,
+                    # TODO: add parameters (6.7B or 5B)
+                    "Number attention heads": args.num_attention_heads,
+                    "Max positional embeddings size": args.max_position_embeddings,
+                    "Environment variables": {
+                        variable: value
+                        for variable, value in os.environ.items()
+                        if variable.startswith("NEURON") or variable.startswith("XLA")
+                    },
+                    "Iterations": args.train_iters,
+                    "Model": "Megatron-LM GPT",
+                    "World size": args.world_size,
+                }
+            )
+    if iteration == args.train_iters and is_last_rank():
+        tm = TrainingMetrics("/tmp/test_dict.json")
+        additional_data = {"Iteration": iteration, "Microstep": microsteps}
+        metric_data = [
+            Metric("Final loss", round(last_loss, 4), "", additional_data),
+            Metric("Peak throughput", round(thr.throughput_peak, 4), "seq/s", additional_data),
+            Metric("Average throughput", round(sum(thr.throughputs)/len(thr.throughputs), 4), "seq/s", additional_data)
+        ]
+        tm.store_metrics(metric_data)
 
     return report_memory_flag
 
@@ -807,6 +886,16 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
                                           grad_norm, params_norm, num_zeros_in_grad, throughput, golden_loss,
                                           model, optimizer, lr_scheduler, ckpts))
 
+        if mpu.get_pipeline_model_parallel_world_size() > 1 and (iteration == 1 or iteration == 64):
+            # TODO: Currently torch-xla generates multiple graphs for same purpose.
+            # For example, there are 4-5 graphs of optimizer, each differing in a single
+            # line. Each model ends up taking some memory resulting in device OOM. To tack this
+            # we unload all the models at step 64 (this is a place we see new compiles) and load
+            # fresh set of steady state models. This way we only have one copy of each part in 
+            # memory. Fix the issue related to compile on one line difference and remove 
+            # the below lines.
+            unload_all_models()
+
         #XLA uses add_step_closure instead 
         #report_memory_flag = training_markstep_closure(loss_dict, total_loss_dict,
         #                                  optimizer.param_groups[0]['lr'],
@@ -820,12 +909,12 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         #                                      lr_scheduler)
 
         # Evaluation
-        #if args.eval_interval and iteration % args.eval_interval == 0 and \
-        #   args.do_valid:
-        #    prefix = 'iteration {}'.format(iteration)
-        #    evaluate_and_print_results(prefix, forward_step_func,
-        #                               valid_data_iterator, model,
-        #                               iteration, False)
+        if args.eval_interval and iteration % args.eval_interval == 0 and \
+          args.do_valid:
+           prefix = 'iteration {}'.format(iteration)
+           evaluate_and_print_results(prefix, forward_step_func,
+                                      valid_data_iterator, model,
+                                      iteration, False)
 
         # Exiting based on duration
         #if args.exit_duration_in_mins:
@@ -854,7 +943,35 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
 
     return iteration
 
+def evaluate_markstep_closure(prefix, total_loss_dict, iteration):
+    
+    args = get_args()
+    writer = get_tensorboard_writer()
+    
+    total_loss_dict = {key: value.cpu().item() for key, value in total_loss_dict.items()}
+    string = ' validation loss at {} | '.format(prefix)
+    for key in total_loss_dict:
+        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key])
+        ppl = math.exp(min(20, total_loss_dict[key]))
+        string += '{} PPL: {:.6E} | '.format(key, ppl)
+        if writer:
+            writer.add_scalar('{} validation'.format(key),
+                              total_loss_dict[key],
+                              iteration)
+            writer.add_scalar('{} validation vs samples'.format(key),
+                              total_loss_dict[key],
+                              args.consumed_train_samples)
+            if args.log_validation_ppl_to_tensorboard:
+                writer.add_scalar('{} validation ppl'.format(key), ppl,
+                                  iteration)
+                writer.add_scalar('{} validation ppl vs samples'.format(key),
+                                  ppl, args.consumed_train_samples)
 
+    length = len(string) + 1
+    print_rank_last('-' * length)
+    print_rank_last(string)
+    print_rank_last('-' * length)
+    
 def evaluate(forward_step_func, data_iterator, model, verbose=False):
     """Evaluation."""
     args = get_args()
@@ -909,29 +1026,7 @@ def evaluate_and_print_results(prefix, forward_step_func,
     writer = get_tensorboard_writer()
 
     total_loss_dict = evaluate(forward_step_func, data_iterator, model, verbose)
-    total_loss_dict = {key: value.item() for key, value in total_loss_dict.items()}
-    string = ' validation loss at {} | '.format(prefix)
-    for key in total_loss_dict:
-        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key])
-        ppl = math.exp(min(20, total_loss_dict[key]))
-        string += '{} PPL: {:.6E} | '.format(key, ppl)
-        if writer:
-            writer.add_scalar('{} validation'.format(key),
-                              total_loss_dict[key],
-                              iteration)
-            writer.add_scalar('{} validation vs samples'.format(key),
-                              total_loss_dict[key],
-                              args.consumed_train_samples)
-            if args.log_validation_ppl_to_tensorboard:
-                writer.add_scalar('{} validation ppl'.format(key), ppl,
-                                  iteration)
-                writer.add_scalar('{} validation ppl vs samples'.format(key),
-                                  ppl, args.consumed_train_samples)
-
-    length = len(string) + 1
-    print_rank_last('-' * length)
-    print_rank_last(string)
-    print_rank_last('-' * length)
+    xm.add_step_closure(evaluate_markstep_closure, (prefix, total_loss_dict, iteration))
 
 
 def cyclic_iter(iter):
@@ -1004,7 +1099,9 @@ def build_train_valid_test_data_iterators(
             valid_ds, args.consumed_valid_samples)
         test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
-        train_device_dataloader = pl.MpDeviceLoader(train_dataloader, device)
+        train_device_dataloader = pl.MpDeviceLoader(
+            train_dataloader, device, 
+            batches_per_execution = get_num_microbatches() if mpu.get_pipeline_model_parallel_world_size() > 1 else 1)
         valid_device_dataloader = pl.MpDeviceLoader(valid_dataloader, device)
         test_device_dataloader = pl.MpDeviceLoader(test_dataloader, device)
 

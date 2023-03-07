@@ -81,9 +81,18 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
         total_norm = max(grad.abs().max() for grad in grads_for_norm)
         total_norm_cuda = torch.cuda.FloatTensor([float(total_norm)])
         # Take max across all model-parallel GPUs.
-        torch.distributed.all_reduce(total_norm_cuda,
+        # TODO : Revert after fixing issue with topology size
+        if mpu.get_pipeline_model_parallel_world_size() == 1:
+            torch.distributed.all_reduce(total_norm_cuda,
                                      op=torch.distributed.ReduceOp.MAX,
                                      group=mpu.get_model_parallel_group())
+        else:
+            torch.distributed.all_reduce(total_norm_cuda,
+                                     op=torch.distributed.ReduceOp.MAX,
+                                     group=mpu.get_tensor_model_parallel_group())
+            torch.distributed.all_reduce(total_norm_cuda,
+                                     op=torch.distributed.ReduceOp.MAX,
+                                     group=mpu.get_pipeline_model_parallel_group())
         total_norm = total_norm_cuda[0].item()
 
     else:
@@ -111,9 +120,20 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
                 total_norm += grad_norm ** norm_type
 
         # Sum across all model-parallel GPUs.
-        torch.distributed.all_reduce(total_norm,
+        # TODO : Revert after fixing issue with topology size
+        if mpu.get_pipeline_model_parallel_world_size() == 1:
+            torch.distributed.all_reduce(total_norm,
                                      op=torch.distributed.ReduceOp.SUM,
                                      group=mpu.get_model_parallel_group(),
+                                     async_op=True)
+        else:
+            torch.distributed.all_reduce(total_norm,
+                                     op=torch.distributed.ReduceOp.SUM,
+                                     group=mpu.get_tensor_model_parallel_group(),
+                                     async_op=True)
+            torch.distributed.all_reduce(total_norm,
+                                     op=torch.distributed.ReduceOp.SUM,
+                                     group=mpu.get_pipeline_model_parallel_group(),
                                      async_op=True)
         #total_norm = total_norm.item() ** (1.0 / norm_type)
         total_norm = torch.pow(total_norm, 1.0 / norm_type)
@@ -151,9 +171,17 @@ def count_zeros_fp32(parameters):
             total_num_zeros = num_zeros + total_num_zeros
 
     # Sum across all model-parallel GPUs.
-    torch.distributed.all_reduce(total_num_zeros,
+    if mpu.get_pipeline_model_parallel_world_size() == 1:
+        torch.distributed.all_reduce(total_num_zeros,
                                  op=torch.distributed.ReduceOp.SUM,
                                  group=mpu.get_model_parallel_group())
+    else:
+        torch.distributed.all_reduce(total_num_zeros,
+                                 op=torch.distributed.ReduceOp.SUM,
+                                 group=mpu.get_tensor_model_parallel_group())
+        torch.distributed.all_reduce(total_num_zeros,
+                                 op=torch.distributed.ReduceOp.SUM,
+                                 group=mpu.get_pipeline_model_parallel_group())
     total_num_zeros = total_num_zeros.item()
 
     return total_num_zeros

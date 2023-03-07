@@ -21,7 +21,6 @@ from .initialize import get_tensor_model_parallel_group
 from .initialize import get_tensor_model_parallel_rank
 from .initialize import get_tensor_model_parallel_world_size
 from .utils import VocabUtility
-import torch_xla.core.xla_model as xm
 
 
 class _VocabParallelCrossEntropy(torch.autograd.Function):
@@ -31,6 +30,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
 
         # Maximum value along vocab dimension across all GPUs.
         logits_max = torch.max(vocab_parallel_logits, dim=-1)[0]
+        # Isolating the all_reduce till the compiler fixes the token issue
         torch.distributed.all_reduce(logits_max,
                                      op=torch.distributed.ReduceOp.MAX,
                                      group=get_tensor_model_parallel_group(),
@@ -75,7 +75,6 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
                                      op=torch.distributed.ReduceOp.SUM,
                                      group=get_tensor_model_parallel_group(),
                                      async_op=True)
-
         # Sum of exponential of logits along vocab dimension across all GPUs.
         #new xla friendly
         #exp_logits = vocab_parallel_logits
@@ -86,7 +85,6 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
                                      op=torch.distributed.ReduceOp.SUM,
                                      group=get_tensor_model_parallel_group(),
                                      async_op=True)
-
         # Loss = log(sum(exp(logits))) - predicted-logit.
         loss = torch.log(sum_exp_logits) - predicted_logits
 

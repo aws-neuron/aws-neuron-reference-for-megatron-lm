@@ -30,7 +30,7 @@ from megatron.utils import average_losses_across_data_parallel_group
 import torch_xla.core.xla_model as xm
 import os
 
-os.environ["NEURON_CC_FLAGS"] = "--model-type transformer"
+os.environ["NEURON_CC_FLAGS"] = os.environ.get('NEURON_CC_FLAGS', '') + " --model-type transformer"
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
@@ -87,9 +87,9 @@ def loss_func(loss_mask, output_tensor):
     if mpu.get_data_parallel_world_size() > 1:
         # Reduce loss for logging.
         averaged_loss = average_losses_across_data_parallel_group([loss])
-        return loss, {'lm loss': averaged_loss[0]}
+        return loss, {'lm loss': averaged_loss[0].detach()}
     else:
-        return loss, {'lm loss': loss}
+        return loss, {'lm loss': loss.detach()}
 
 
 def forward_step(data_iterator, model):
@@ -98,10 +98,11 @@ def forward_step(data_iterator, model):
     timers = get_timers()
 
     # Get the batch.
-    timers('batch-generator').start()
+    #commenting the line timer.start and timer.stop out to enable evaluation step
+    # timers('batch-generator').start()
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
         data_iterator)
-    timers('batch-generator').stop()
+    # timers('batch-generator').stop()
     output_tensor = model(tokens, position_ids, attention_mask,
                           labels=labels)
 
@@ -130,3 +131,4 @@ if __name__ == '__main__':
     pretrain(train_valid_test_datasets_provider, model_provider,
              ModelType.encoder_or_decoder,
              forward_step, args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
+    xm.rendezvous('ending')

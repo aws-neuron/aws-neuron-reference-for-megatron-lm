@@ -31,6 +31,7 @@ from megatron import mpu
 from megatron.model.module import param_is_not_shared
 from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
 import torch_xla.core.xla_model as xm
+from torch_neuronx.xla_impl.ops import set_unload_prior_neuron_models_mode
 
 
 def unwrap_model(model, module_instances=(torchDDP)):
@@ -216,4 +217,8 @@ def get_ltor_masks_and_position_ids(data,
 
     return attention_mask, loss_mask, position_ids
 
-
+def unload_all_models():
+    set_unload_prior_neuron_models_mode(True)
+    _ = torch.tensor(1).to(xm.xla_device())
+    xm.mark_step()
+    set_unload_prior_neuron_models_mode(False)

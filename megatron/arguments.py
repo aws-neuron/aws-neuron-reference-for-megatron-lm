@@ -565,7 +565,6 @@ def _add_checkpointing_args(parser):
                        'Assumed when loading a release checkpoint.')
     group.add_argument('--keep-last-checkpoint-only', action='store_true',
                        help='Keep only the most recent checkpoint')
-   
     return parser
 
 
@@ -652,6 +651,9 @@ def _add_distributed_args(parser):
                        help='Call torch.cuda.empty_cache() each iteration '
                        '(training and eval), to reduce fragmentation.'
                        '0=off, 1=moderate, 2=aggressive.')
+    group.add_argument('--deallocate-pipeline-outputs', action='store_true',
+                       default=False, help='If set, pipeline output tensors '
+                       'are deallocated during the forward pass.')
     return parser
 
 
@@ -729,7 +731,7 @@ def _add_data_args(parser):
     #GPT dataset generation argument
     group.add_argument('--gpt-dataset-generation-only', type=bool, default=False, 
                        help='Only generate dataset or run full training')
-
+    
     return parser
 
 

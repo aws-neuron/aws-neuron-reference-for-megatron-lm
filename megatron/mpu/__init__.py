@@ -43,6 +43,7 @@ from .initialize import get_pipeline_model_parallel_prev_rank
 from .initialize import get_tensor_model_parallel_world_size, set_tensor_model_parallel_world_size
 from .initialize import get_pipeline_model_parallel_world_size, set_pipeline_model_parallel_world_size
 from .initialize import get_virtual_pipeline_model_parallel_rank, set_virtual_pipeline_model_parallel_rank
+from .initialize import get_next_rank_group, get_prev_rank_group
 from .initialize import initialize_model_parallel
 from .initialize import model_parallel_is_initialized
 

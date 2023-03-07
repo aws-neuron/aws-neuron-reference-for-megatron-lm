@@ -16,10 +16,16 @@
 from functools import reduce
 import operator
 import torch
+import torch_xla.core.xla_model as xm
 
 from megatron import get_args
 from megatron import mpu
 
+
+def _gather_split_1d_tensor_using_xm_all_reduce(tensor):
+    """Opposite of above function, gather values from model parallel ranks."""
+    return xm.all_gather(tensor,
+         groups=mpu.get_tensor_model_parallel_group()._mesh)
 
 def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
                  tensor_shape,
@@ -48,6 +54,9 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
         (tensor_recv_prev, tensor_recv_next)
     """
     args = get_args()
+    # Running a mark_step at the start and at the end to isolate the send
+    # and receive into separate graphs.
+    xm.mark_step()
 
     # Create placeholder tensors for receive in forward and backward directions
     # if needed.
@@ -81,12 +90,12 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
         requires_grad = False
 
     if recv_prev:
-        tensor_recv_prev = torch.empty(tensor_chunk_shape,
+        tensor_recv_prev = torch.zeros(tensor_chunk_shape,
                                        requires_grad=requires_grad,
                                        device=torch.cuda.current_device(),
                                        dtype=dtype)
     if recv_next:
-        tensor_recv_next = torch.empty(tensor_chunk_shape,
+        tensor_recv_next = torch.zeros(tensor_chunk_shape,
                                        requires_grad=requires_grad,
                                        device=torch.cuda.current_device(),
                                        dtype=dtype)
@@ -108,43 +117,31 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
                                         tensor_recv_next=tensor_recv_next,
                                         group=mpu.get_pipeline_model_parallel_group())
     else:
-        ops = []
-        if tensor_send_prev is not None:
-            send_prev_op = torch.distributed.P2POp(
-                torch.distributed.isend, tensor_send_prev,
-                mpu.get_pipeline_model_parallel_prev_rank())
-            ops.append(send_prev_op)
         if tensor_recv_prev is not None:
-            recv_prev_op = torch.distributed.P2POp(
-                torch.distributed.irecv, tensor_recv_prev,
-                mpu.get_pipeline_model_parallel_prev_rank())
-            ops.append(recv_prev_op)
+            tensor_recv_prev = xm.all_reduce(xm.REDUCE_SUM, tensor_recv_prev,
+                                 groups=mpu.get_prev_rank_group())
+        if tensor_send_prev is not None:
+            _ = xm.all_reduce(xm.REDUCE_SUM, tensor_send_prev,
+                                 groups=mpu.get_prev_rank_group())
         if tensor_send_next is not None:
-            send_next_op = torch.distributed.P2POp(
-                torch.distributed.isend, tensor_send_next,
-                mpu.get_pipeline_model_parallel_next_rank())
-            ops.append(send_next_op)
+            _ = xm.all_reduce(xm.REDUCE_SUM, tensor_send_next,
+                                 groups=mpu.get_next_rank_group())
         if tensor_recv_next is not None:
-            recv_next_op = torch.distributed.P2POp(
-                torch.distributed.irecv, tensor_recv_next,
-                mpu.get_pipeline_model_parallel_next_rank())
-            ops.append(recv_next_op)
-        if len(ops) > 0:
-            reqs = torch.distributed.batch_isend_irecv(ops)
-            for req in reqs:
-                req.wait()
+            tensor_recv_next = xm.all_reduce(xm.REDUCE_SUM, tensor_recv_next,
+                                 groups=mpu.get_next_rank_group())
     # To protect against race condition when using batch_isend_irecv().
     torch.cuda.synchronize()
+    xm.mark_step()
 
     # If using scatter-gather optimization, gather smaller chunks.
     if not override_scatter_gather_tensors_in_pipeline and \
             args.scatter_gather_tensors_in_pipeline:
         if recv_prev:
-            tensor_recv_prev = mpu.gather_split_1d_tensor(
+            tensor_recv_prev = _gather_split_1d_tensor_using_xm_all_reduce(
                 tensor_recv_prev).view(tensor_shape).requires_grad_()
 
         if recv_next:
-            tensor_recv_next = mpu.gather_split_1d_tensor(
+            tensor_recv_next = _gather_split_1d_tensor_using_xm_all_reduce(
                 tensor_recv_next).view(tensor_shape).requires_grad_()
 
     return tensor_recv_prev, tensor_recv_next
