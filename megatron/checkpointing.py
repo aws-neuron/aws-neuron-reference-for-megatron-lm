@@ -23,6 +23,8 @@ import numpy as np
 import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.utils.serialization as xser
+import datetime
+import shutil
 
 from megatron import (get_args,
                       mpu,
@@ -41,9 +43,17 @@ class Checkpoint:
         self.checkpoint_list = checkpoint_list
 
     def keep_recent_checkpoint(self):
-        for ckpt in self.checkpoint_list[:-1]:
-            shutil.rmtree(ckpt)
-            self.checkpoint_list.remove(ckpt)
+        to_remove = self.checkpoint_list[:-1]
+        removed = set()
+
+        for ckpt in to_remove:
+            print_rank_2D("Removing checkpoint {}".format(ckpt))
+            if ckpt not in removed:
+                shutil.rmtree(ckpt)
+                self.checkpoint_list.remove(ckpt)
+                removed.add(ckpt)
+            else:
+                print_rank_2D("** Duplicate checkpoint in list for removal **")
 
     def num_checkpoints(self):
         return len(self.checkpoint_list)
@@ -182,17 +192,22 @@ def save(data, file_or_path):
       writes from the same host will override each other.
   """
   should_chkpt = True if mpu.get_data_parallel_rank() == 0 else False
+  #print_rank_2D('Before maybe convert')
   cpu_data = xm._maybe_convert_to_cpu(data, convert=should_chkpt)
+  #print_rank_2D('After maybe convert')
 
   for tp_rank in range(0, mpu.get_tensor_model_parallel_world_size()):
       my_tp_rank = mpu.get_tensor_model_parallel_rank()
       should_write_data = True if mpu.get_data_parallel_rank() == 0 and my_tp_rank == tp_rank else False
+      print_rank_2D('should_i_write?:{}, dp rank:{} iterated tp rank:{}=={}'.format(should_write_data, mpu.get_data_parallel_rank(), my_tp_rank, tp_rank) )
 
       #Staggering save checkpoints
       if should_write_data:
           print_rank_2D('file_or_path:{}'.format(file_or_path))
           ensure_directory_exists(file_or_path)
+          print_rank_2D('file_or_path:{} - dir exists'.format(file_or_path))
           torch.save(cpu_data, file_or_path)
+          print_rank_2D('file_or_path:{} - saved'.format(file_or_path))
 
       xm.rendezvous(f'chktp-save-{tp_rank}')
 
@@ -208,7 +223,7 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     model = utils.unwrap_model(model)
 
     print_rank_0('saving checkpoint at iteration {:7d} to {}'.format(
-        iteration, args.save))
+        iteration, args.save if  args.save is not None else args.save_xser))
 
     # Arguments, iteration, and model.
     state_dict = {}
@@ -225,7 +240,7 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
 
     state_dict['checkpoint_version'] = 3.0
     state_dict['iteration'] = iteration
-    
+
     if len(model) == 1:
         state_dict['model'] = model[0].state_dict_for_save_checkpoint()
     else:
@@ -242,13 +257,13 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
 
     # RNG states.
     if not args.no_save_rng:
-        print_rank_0("saving_rng")
+        #print_rank_0("saving_rng")
         state_dict['random_rng_state'] = random.getstate()
         rng_state = state_dict['random_rng_state']
         print_rank_0(str(type(state_dict['random_rng_state'])))
-        print_rank_0("after rng type")
-        for r in rng_state:
-            print_rank_0(str(type(r)))
+        #print_rank_0("after rng type")
+        #for r in rng_state:
+        #    print_rank_0(str(type(r)))
         state_dict['np_rng_state'] = np.random.get_state()
         state_dict['torch_rng_state'] = torch.get_rng_state()
         state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
@@ -261,10 +276,12 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     if master_only:
         print_rank_2D('checkpoint_name:{}'.format(checkpoint_name))
         ensure_directory_exists(checkpoint_name)
-    
+
     if args.save_xser:
         xser.save(state_dict, checkpoint_name, (not master_only), global_master=True)
+        print_rank_0(f"Completed xser.save at rank 0")
     else:
+        print_rank_2D('Checkpoint state_dict keys:{}'.format(state_dict.keys()))
         save(state_dict, checkpoint_name)
     # we don;t need this barrier as save above has it
     # Wait so everyone is done (necessary)
@@ -282,6 +299,8 @@ def save_checkpoint(iteration, model, optimizer, lr_scheduler):
     #if torch.distributed.is_initialized():
     #    torch.distributed.barrier()
     xm.rendezvous('Checkpoint Done')
+
+    return checkpoint_name
 
 def _transpose_first_dim(t, num_splits, num_splits_first, model):
     input_shape = t.size()
@@ -364,6 +383,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
     model = utils.unwrap_model(model)
     # Read the tracker file and set the iteration.
     tracker_filename = get_checkpoint_tracker_filename(load_dir)
+    print_rank_2D(f"Load checkpoint from 'args.{load_arg}' = {load_dir} -> {tracker_filename}")
 
     # If no tracker file, return iretation zero.
     if not os.path.isfile(tracker_filename):
@@ -379,13 +399,14 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
 
     # Checkpoint.
     checkpoint_name = get_checkpoint_name(load_dir, iteration, release)
-    print_rank_0(f' loading checkpoint from {load_dir} at iteration {iteration}')
+    dt_now = datetime.datetime.now().isoformat()
+    print_rank_0(f'[{dt_now}] loading checkpoint from {load_dir} at iteration {iteration}')
 
     # Load the checkpoint.
     try:
         if args.load_xser:
             state_dict = xser.load(checkpoint_name)
-        else:    
+        else:
             state_dict = torch.load(checkpoint_name, map_location='cpu')
     except ModuleNotFoundError:
         from megatron.fp16_deprecated import loss_scaler
@@ -431,7 +452,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
         for i in range(len(model)):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
             model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
-    
+
     # Check arguments.
     assert args.consumed_train_samples == 0
     assert args.consumed_valid_samples == 0
@@ -449,7 +470,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
         checkpoint_args['make_vocab_size_divisible_by'] = state_dict['make_vocab_size_divisible_by']
         checkpoint_args['padded_vocab_size'] = state_dict['padded_vocab_size']
         checkpoint_args['tokenizer_type'] = state_dict['tokenizer_type']
-        
+
     check_checkpoint_args(checkpoint_args)
     args.consumed_train_samples = int(getattr(checkpoint_args,
                                             'consumed_train_samples', 0))
@@ -482,12 +503,12 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
     if not release and not args.finetune and not args.no_load_rng:
         try:
             #Converting random rng state from list to tuple for compatibility
-            #(TODO) Error when loading rng random states checkpointing 
+            #(TODO) Error when loading rng random states checkpointing
             rng_state = state_dict['random_rng_state']
             for i in range(len(rng_state)):
                 if type(rng_state[i]) is list:
                     rng_state[i] = tuple(rng_state[i])
-            print_rank_0(tuple(rng_state))
+            #print_rank_0(tuple(rng_state))
             random.setstate(tuple(rng_state))
             np.random.set_state(state_dict['np_rng_state'])
             torch.set_rng_state(state_dict['torch_rng_state'])
@@ -508,6 +529,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
+    dt_now = datetime.datetime.now().isoformat()
     print_rank_0(f'  successfully loaded checkpoint from {args.load} '
                  f'at iteration {iteration}')
 
@@ -517,7 +539,7 @@ def load_checkpoint(model, optimizer, lr_scheduler, load_arg='load', strict=True
 def load_biencoder_checkpoint(model, only_query_model=False,
         only_context_model=False, custom_load_path=None):
     """
-    selectively load retrieval models for indexing/retrieving 
+    selectively load retrieval models for indexing/retrieving
     from saved checkpoints
     """
 
@@ -533,8 +555,9 @@ def load_biencoder_checkpoint(model, only_query_model=False,
 
     checkpoint_name = get_checkpoint_name(load_path, iteration, False)
     if mpu.get_data_parallel_rank() == 0:
-        print('global rank {} is loading checkpoint {}'.format(
-            torch.distributed.get_rank(), checkpoint_name))
+        dt_now = datetime.datetime.now().isoformat()
+        print('[{}] global rank {} is loading checkpoint {}'.format(
+            dt_now, torch.distributed.get_rank(), checkpoint_name))
 
     state_dict = torch.load(checkpoint_name, map_location='cpu')
     ret_state_dict = state_dict['model']
@@ -549,8 +572,10 @@ def load_biencoder_checkpoint(model, only_query_model=False,
     torch.distributed.barrier()
 
     if mpu.get_data_parallel_rank() == 0:
-        print(' successfully loaded {}'.format(checkpoint_name))
+        dt_now = datetime.datetime.now().isoformat()
+        print(' [{}] successfully loaded {}'.format(dt_now, checkpoint_name))
 
     return model
+
 
 

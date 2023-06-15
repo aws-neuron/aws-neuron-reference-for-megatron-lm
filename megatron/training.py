@@ -69,7 +69,7 @@ torch.cuda.DoubleTensor = lambda t: torch.DoubleTensor(t).to(xm.xla_device())
 torch.cuda.FloatTensor = lambda t: torch.FloatTensor(t).to(xm.xla_device())
 torch.cuda.IntTensor = lambda t: torch.IntTensor(t).to(xm.xla_device())
 torch.cuda.LongTensor = lambda t: torch.LongTensor(t).to(xm.xla_device())
-torch.cuda.current_device = lambda: xm.xla_device() 
+torch.cuda.current_device = lambda: xm.xla_device()
 
 stats = {'iteration': [], 'consumed_samples': [], 'time': [], 'learning_rate': [], 'global_batch_size': [], 'lm_loss': [], 'loss_scale': [], 'grad_norm': [], 'skipped_iterations': [], 'nan_iterations': [],'forward-compute': [], 'backward-compute': [], 'backward-params-all-reduce': [], 'backward-embedding-all-reduce': [], 'optimizer-copy-to-main-grad': [], 'optimizer-unscale-and-check-inf': [], 'optimizer-clip-main-grad': [], 'optimizer-copy-main-to-model-params': [], 'optimizer': [], 'batch-generator': [], 'params_norm':[]}
 Metric = namedtuple("Metric", ["name", "value", "units", "additional_data"])
@@ -196,29 +196,29 @@ def pretrain(train_valid_test_dataset_provider,
     #print_datetime('after megatron is initialized')
 
     args = get_args()
-    #timers = get_timers()
-   
+    timers = get_timers()
+
     #Don't compile any hlos for dataset generation
     if args.gpt_dataset_generation_only == True:
         os.environ['NEURON_EXTRACT_GRAPHS_ONLY'] = "1"
         os.environ['NEURON_FALL_BACK_TO_NULL_NEFF'] = "1"
-    
+
     #Only generate dataset for rank 0
     if mpu.get_tensor_model_parallel_rank() != 0 and args.gpt_dataset_generation_only == True:
         return
 
     # Model, optimizer, and learning rate.
-    #timers('model-and-optimizer-setup').start()
+    timers('model-and-optimizer-setup').start()
     model, optimizer, lr_scheduler = setup_model_and_optimizer(model_provider,
                                                                model_type)
-    #timers('model-and-optimizer-setup').stop()
-    #print_datetime('after model, optimizer, and learning rate '
-    #               'scheduler are built')
+    timers('model-and-optimizer-setup').stop()
+    print_datetime('after model, optimizer, and learning rate '
+                   'scheduler are built')
 
     # Data stuff.
-    #timers('train/valid/test-data-iterators-setup').start()
+    timers('train/valid/test-data-iterators-setup').start()
     if (args.gpt_dataset_generation_only == True and mpu.get_tensor_model_parallel_rank() == 0) \
-        or args.gpt_dataset_generation_only == False:    
+        or args.gpt_dataset_generation_only == False:
         if args.virtual_pipeline_model_parallel_size is not None:
             all_data_iterators = [
                 build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
@@ -231,17 +231,17 @@ def pretrain(train_valid_test_dataset_provider,
             train_data_iterator, valid_data_iterator, test_data_iterator \
                 = build_train_valid_test_data_iterators(
                     train_valid_test_dataset_provider)
-    #timers('train/valid/test-data-iterators-setup').stop()
-    #print_datetime('after dataloaders are built')
+    timers('train/valid/test-data-iterators-setup').stop()
+    print_datetime('after dataloaders are built')
 
     # Print setup timing.
-    #print_rank_0('done with setup ...')
-    #timers.log(['model-and-optimizer-setup', 'train/valid/test-data-iterators-setup'])
-    #print_rank_0('training ...')
-   
+    print_rank_0('done with setup ...')
+    timers.log(['model-and-optimizer-setup', 'train/valid/test-data-iterators-setup'])
+    print_rank_0('training ...')
+
     #Do not start training step if we only want to generate dataset
     if args.gpt_dataset_generation_only == True:
-        return  
+        return
 
     iteration = 0
     #if args.do_train and args.train_iters > 0:
@@ -250,7 +250,7 @@ def pretrain(train_valid_test_dataset_provider,
         iteration = train(forward_step_func,
                           model, optimizer, lr_scheduler,
                           train_data_iterator, valid_data_iterator)
-    #print_datetime('after training is done')
+    print_datetime('after training is done')
 
     if args.do_valid:
         prefix = 'the end of training for val data'
@@ -371,14 +371,14 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             mpu.get_tensor_model_parallel_rank(),
             mpu.get_pipeline_model_parallel_rank(),
             parameters), flush=True)
-        #if torch.distributed.get_rank() == 0:
-        #    if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
-        #        tm = TrainingMetrics("/tmp/test_dict.json")
-        #        # TODO: when pipeline parallel support comes in, need to aggregate parameters instead of
-        #        # just multiplying by tensor parallel degree
-        #        tm.store_parameters(
-        #            {"Parameters": f"{round(parameters * args.tensor_model_parallel_size / 1e9, 1)}B"}
-        #        )
+        if torch.distributed.get_rank() == 0:
+            if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
+                tm = TrainingMetrics("/tmp/test_dict.json")
+                # TODO: when pipeline parallel support comes in, need to aggregate parameters instead of
+                # just multiplying by tensor parallel degree
+                tm.store_parameters(
+                    {"Parameters": f"{round(parameters * args.tensor_model_parallel_size / 1e9, 1)}B"}
+                )
 
     # GPU allocation.
     for model_module in model:
@@ -470,12 +470,13 @@ def setup_model_and_optimizer(model_provider_func, model_type):
     lr_scheduler = get_learning_rate_scheduler(optimizer)
 
     if (args.load or args.load_xser) and not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
-        load_arg='load' if args.load else 'load_xser'
+        load_arg='load' if args.load is not None else 'load_xser'
         timers = get_timers()
         timers('load-checkpoint').start()
         #Staggering load checkpoints
         for i in range(0, mpu.get_tensor_model_parallel_world_size()):
             if mpu.get_tensor_model_parallel_rank() == i:
+                print_rank_2D("+ Loading from checkpoint!")
                 args.iteration = load_checkpoint(model, optimizer, lr_scheduler, load_arg=load_arg)
                 print_rank_2D(f'Finished Loading Phase-{i}')
             xm.rendezvous(f'load-chkpt-phase-{i}')
@@ -483,6 +484,8 @@ def setup_model_and_optimizer(model_provider_func, model_type):
         timers.log(['load-checkpoint'])
     else:
         args.iteration = 0
+
+    print_rank_0("Finished loading from checkpoint")
 
     # We only support local DDP with multiple micro-batches.
     if len(model) > 1 or mpu.get_pipeline_model_parallel_world_size() > 1:
@@ -514,7 +517,7 @@ def train_step(forward_step_func, data_iterator,
     if args.DDP_impl == 'local' and args.use_contiguous_buffers_in_local_ddp:
         for partition in model:
             partition.zero_grad_buffer()
-    #Allowing this alternate way of zero'ing gradient results in a NEFF reduction        
+    #Allowing this alternate way of zero'ing gradient results in a NEFF reduction
     #optimizer.zero_grad()
     optimizer.zero_grad(set_to_none=False)
 
@@ -530,16 +533,16 @@ def train_step(forward_step_func, data_iterator,
 
     # All-reduce if needed.
     if args.DDP_impl == 'local':
-        #timers('backward-params-all-reduce').start()
+        timers('backward-params-all-reduce').start()
         for model_module in model:
             model_module.allreduce_gradients()
-        #timers('backward-params-all-reduce').stop()
+        timers('backward-params-all-reduce').stop()
 
     # All-reduce word_embeddings' grad across first and last stages to ensure
     # that word_embeddings parameters stay in sync.
     # This should only run for models that support pipelined model parallelism
     # (BERT and GPT-2).
-    #timers('backward-embedding-all-reduce').start()
+    timers('backward-embedding-all-reduce').start()
     if mpu.is_rank_in_embedding_group(ignore_virtual=True) and \
             mpu.get_pipeline_model_parallel_world_size() > 1:
         if mpu.is_pipeline_first_stage(ignore_virtual=True):
@@ -558,11 +561,11 @@ def train_step(forward_step_func, data_iterator,
             else:
                 grad = word_embeddings_weight.grad
             torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
-    #timers('backward-embedding-all-reduce').stop()
+    timers('backward-embedding-all-reduce').stop()
     # Update parameters.
-    #timers('optimizer').start()
+    timers('optimizer').start()
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    #timers('optimizer').stop()
+    timers('optimizer').stop()
 
     # Update learning rate.
     if update_successful:
@@ -627,27 +630,31 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
 
     assert skipped_iter == 0
 
+    master_tprank0_only = mpu.get_data_parallel_rank() == 0 and mpu.get_tensor_model_parallel_rank() == 0
+
     # Checkpointing
     saved_checkpoint = False
     if (args.save or args.save_xser) and args.save_interval and \
         iteration % args.save_interval == 0 and \
         not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None):
-        save_checkpoint_and_time(iteration, model, optimizer,
+        cp_path = save_checkpoint_and_time(iteration, model, optimizer,
                                     lr_scheduler)
         saved_checkpoint = True
 
-        ckpt_parent_path = args.save if args.save else args.save_xser
-        ckpts.checkpoint_list.append(os.path.join(ckpt_parent_path, 'iter_{:07d}'.format(iteration)))
-    
-    # Keep only most recent checkpoint if flag set
-    master_only = mpu.get_data_parallel_rank() == 0
-    if ckpts.num_checkpoints() > 1 and args.keep_last_checkpoint_only and master_only:
-        ckpts.keep_recent_checkpoint()
+        if master_tprank0_only:
+            ckpts.checkpoint_list.append(os.path.dirname(os.path.dirname(cp_path)))
+            print_rank_2D(f"Added checkpoint {cp_path} to tracking list, now at {ckpts.num_checkpoints()} count.")
+            # Keep only most recent checkpoint if flag set
+            if ckpts.num_checkpoints() > 1 and args.keep_last_checkpoint_only:
+                print_rank_2D(f"Keeping last checkpoint only (--keep_last_checkpoint_only).")
+                ckpts.keep_recent_checkpoint()
+
+    xm.rendezvous(f'End checkpoint deletion')
 
     # Advanced iterations.
     total_loss_dict[advanced_iters_key] = total_loss_dict.get(
         advanced_iters_key, 0) + 1
-    
+
     # Return immediately and avoid device synchronization
     if iteration % args.tensorboard_log_interval != 0:
         return
@@ -666,7 +673,7 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
 
     total_iterations = total_loss_dict[advanced_iters_key]
 
-    throughput = thr.get_throughput()   
+    throughput = thr.get_throughput()
     throughput_peak = thr.throughput_peak
     thr.throughput_sum += throughput
     # Tensorboard values.
@@ -702,7 +709,7 @@ def training_markstep_closure(loss_dict, total_loss_dict, learning_rate, iterati
                               args.consumed_train_samples)
         if throughput is not None:
             writer.add_scalar('throughput', throughput, iteration)
-            writer.add_scalar('throughput vs samples', throughput, 
+            writer.add_scalar('throughput vs samples', throughput,
                               args.consumed_train_samples)
 
     if iteration % args.log_interval == 0:
@@ -816,10 +823,11 @@ def save_checkpoint_and_time(iteration, model, optimizer, lr_scheduler):
     # all ranks report the max time.
     torch.distributed.barrier()
     timers('save-checkpoint').start()
-    save_checkpoint(iteration, model, optimizer, lr_scheduler)
+    cp_path = save_checkpoint(iteration, model, optimizer, lr_scheduler)
     torch.distributed.barrier()
     timers('save-checkpoint').stop()
     timers.log(['save-checkpoint'])
+    return cp_path
 
 
 def train(forward_step_func, model, optimizer, lr_scheduler,
@@ -874,7 +882,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
-            
+
         for key in loss_dict:
             total_loss_dict[key] = total_loss_dict.get(
                 key, torch.FloatTensor([0.0]).to(xm.xla_device()))
@@ -891,12 +899,12 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             # For example, there are 4-5 graphs of optimizer, each differing in a single
             # line. Each model ends up taking some memory resulting in device OOM. To tack this
             # we unload all the models at step 64 (this is a place we see new compiles) and load
-            # fresh set of steady state models. This way we only have one copy of each part in 
-            # memory. Fix the issue related to compile on one line difference and remove 
+            # fresh set of steady state models. This way we only have one copy of each part in
+            # memory. Fix the issue related to compile on one line difference and remove
             # the below lines.
             unload_all_models()
 
-        #XLA uses add_step_closure instead 
+        #XLA uses add_step_closure instead
         #report_memory_flag = training_markstep_closure(loss_dict, total_loss_dict,
         #                                  optimizer.param_groups[0]['lr'],
         #                                  iteration, loss_scale,
@@ -940,14 +948,14 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         #    print_datetime('exiting program at iteration {}'.format(iteration))
         #    sys.exit()
 
-
+    xm.rendezvous(f'Training Done')
     return iteration
 
 def evaluate_markstep_closure(prefix, total_loss_dict, iteration):
-    
+
     args = get_args()
     writer = get_tensorboard_writer()
-    
+
     total_loss_dict = {key: value.cpu().item() for key, value in total_loss_dict.items()}
     string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
@@ -971,7 +979,7 @@ def evaluate_markstep_closure(prefix, total_loss_dict, iteration):
     print_rank_last('-' * length)
     print_rank_last(string)
     print_rank_last('-' * length)
-    
+
 def evaluate(forward_step_func, data_iterator, model, verbose=False):
     """Evaluation."""
     args = get_args()
@@ -1056,7 +1064,7 @@ def build_train_valid_test_data_iterators(
     # Data loader only on rank 0 of each model parallel group.
     #if mpu.get_tensor_model_parallel_rank() == 0:
     if True:
-        
+
         # Number of train/valid/test samples.
         if args.train_samples:
             train_samples = args.train_samples
@@ -1084,10 +1092,10 @@ def build_train_valid_test_data_iterators(
         #if mpu.get_tensor_model_parallel_rank() == 0:
         #    train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
         #        train_val_test_num_samples)
-        #    torch.distributed.all_reduce(dummy_sync, async_op=True) 
+        #    torch.distributed.all_reduce(dummy_sync, async_op=True)
         #    xm.mark_step()
         #else:
-        #    torch.distributed.all_reduce(dummy_sync, async_op=True) 
+        #    torch.distributed.all_reduce(dummy_sync, async_op=True)
         #    xm.mark_step()
         #    train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
         #        train_val_test_num_samples)
@@ -1100,7 +1108,7 @@ def build_train_valid_test_data_iterators(
         test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
         train_device_dataloader = pl.MpDeviceLoader(
-            train_dataloader, device, 
+            train_dataloader, device,
             batches_per_execution = get_num_microbatches() if mpu.get_pipeline_model_parallel_world_size() > 1 else 1)
         valid_device_dataloader = pl.MpDeviceLoader(valid_dataloader, device)
         test_device_dataloader = pl.MpDeviceLoader(test_dataloader, device)
@@ -1161,4 +1169,5 @@ def build_train_valid_test_data_iterators(
 
     #return train_data_iterator, valid_data_iterator, test_data_iterator
     return train_device_data_iterator, valid_device_data_iterator, test_device_data_iterator
+
 

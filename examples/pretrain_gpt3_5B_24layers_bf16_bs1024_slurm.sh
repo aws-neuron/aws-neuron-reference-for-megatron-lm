@@ -82,6 +82,7 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     --adam-beta2 0.95 \
     --save-xser $CHECKPOINT_PATH \
     --save-interval 2000 \
+    --keep-last-checkpoint-only \
     --use-cpu-initialization \
     --tensorboard-dir $TB_DIR \
     |& tee run_log_$MODEL_CONFIG_NAME.$RANK_NODE.$WORLD_SIZE_JOB.txt &
